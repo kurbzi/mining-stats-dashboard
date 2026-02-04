@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime state files – should be created automatically
+blocks.json
+blocks.json.tmp
+blocks.json.bak
+weekly_best.json
+weekly_best.json.tmp
+weekly_best.json.bak
+miner_of_week.json
+miner_of_week.json.tmp
+miner_of_week.json.bak
