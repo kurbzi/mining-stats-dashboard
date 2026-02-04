@@ -1961,8 +1961,8 @@ if __name__ == "__main__":
     _load_weekly_best()
     _load_motw()
 
-    # Ensure weekly baseline exists (safe even if blocks.json is empty)
     with _blocks_lock:
+        global week_start_unix, week_start_counts
         if week_start_unix is None:
             week_start_unix = int(time.time())
         if not isinstance(week_start_counts, dict) or not week_start_counts:
@@ -1973,4 +1973,5 @@ if __name__ == "__main__":
     threading.Thread(target=coin_loop, daemon=True).start()
     threading.Thread(target=weekly_rollover_loop, daemon=True).start()
 
-    app.run(host=HOST, port=int(PORT))
+    # 👇 Keep this exactly like this
+    app.run(host="0.0.0.0", port=8788)
