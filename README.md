@@ -1,5 +1,9 @@
 # Mining Stats Dashboard (V1)
 
+## 📸 Screenshot
+
+![Mining Stats Dashboard](assets/dashboard.jpg)
+
 A lightweight, self-hosted mining dashboard for NerdQAxe and BitAxe Gamma miners.
 
 This project polls miner APIs on your local network, tracks hashrate, temperatures,
@@ -97,5 +101,6 @@ If your miner does not expose a block counter, blocks will remain 0 in v1.0.0.
 
 This project is free and open source.  
 If it’s helped you keep your farm happy, you can optionally send a tip:
+
 
 - BTC:bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
