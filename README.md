@@ -1,5 +1,6 @@
 # Mining Stats Dashboard (V1)
 
+![Mining Stats Dashboard](main/dashboard.jpg)
 
 A lightweight, self-hosted mining dashboard for NerdQAxe and BitAxe Gamma miners.
 
@@ -101,4 +102,5 @@ If it’s helped you keep your farm happy, you can optionally send a tip:
 
 
 - BTC:bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
+
 
