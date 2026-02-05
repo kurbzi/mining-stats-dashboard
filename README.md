@@ -2,6 +2,8 @@
 
 ![Mining Stats Dashboard](dashboard.jpg)
 
+![Block Found Screen](blockfound.jpg)
+
 A lightweight, self-hosted mining dashboard for NerdQAxe and BitAxe Gamma miners.
 
 This project polls miner APIs on your local network, tracks hashrate, temperatures,
@@ -102,6 +104,7 @@ If it’s helped you keep your farm happy, you can optionally send a tip:
 
 
 - BTC:bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
+
 
 
 
