@@ -123,8 +123,7 @@ understand and accept the security implications.
     - Average and max temperatures across all miners  
 
 **File / script changes**
-
-- Main script is now **`ticker.py`**, not `MSD.py`.  
+ 
 - Uses JSON files in the same directory for persistence:
   - `blocks.json` / `blocks.json.bak`  
   - `weekly_best.json` / `weekly_best.json.bak`  
@@ -215,3 +214,4 @@ This project is free and open source.
 If it’s helped you keep your farm happy, you can optionally send a donation:
 
 BTC: bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
+
