@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# Mining Stats Dashboard — v1.0.0 (Public-Friendly Config)
+# Mining Stats Dashboard — v1.0.1
 # Author: kurbzi
 # License: MIT
 #
@@ -52,12 +52,6 @@ MINERS_PER_PAGE = 3
 #    - If you DO want scoring, set "model" to any name you like (e.g. "MyModel").
 #      Just make sure the same model name exists in MODEL_BASELINES.
 #
-# Example (with model):
-#   "Miner1": {"ip": "192.168.0.191", "label": "My Miner", "model": "MyModel"}
-#
-# Example (no model):
-#   "Miner1": {"ip": "192.168.0.191", "label": "My Miner"}
-#
 MINERS = {
     "Miner1": {
         "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
@@ -72,11 +66,12 @@ MINERS = {
     "Miner3": {
         "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
         "label": "Miner 3 Name",    # <<< PASTE MINER NAME HERE
-        # "model": "AnotherModel",  # <<< OPTIONAL
+        "model": "AnotherModel",    # <<< OPTIONAL
     },
     "Miner4": {
         "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
         "label": "Miner 4 Name",    # <<< PASTE MINER NAME HERE
+        "model": "AnotherModel",    # <<< OPTIONAL
         # No model = no baseline scoring for MOTW (still eligible via blocks/diff/uptime components)
     },
 }
@@ -122,7 +117,8 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 BLOCKS_FILE = os.path.join(BASE_DIR, "blocks.json")
-WEEKLY_BEST_FILE = os.path.join(BASE_DIR, "weekly_best.json")
+WEEKLY_BEST_FILE = os.path.join(BASE_DIR, "weekly_best.json")       # previous week's winner summary
+WEEKLY_CURRENT_FILE = os.path.join(BASE_DIR, "weekly_current.json") # per-miner current-week best diffs
 MOTW_FILE = os.path.join(BASE_DIR, "miner_of_week.json")
 
 IP_TO_LABEL = {cfg["ip"]: cfg.get("label", name) for name, cfg in MINERS.items()}
@@ -157,10 +153,10 @@ last_seen_ts = {}
 
 _weekly_lock = threading.Lock()
 weekly_best = {"prev_name": None, "prev_value": None, "prev_str": None}
+weekly_current = {}  # { miner_name: numeric best diff for THIS week }
 
 _motw_lock = threading.Lock()
 motw = {"prev_name": None, "prev_score": None, "prev_str": None, "prev_week_iso": None}
-
 
 # =========================
 # HELPERS
@@ -283,6 +279,32 @@ def fmt_int(n):
         return "-"
 
 
+def fmt_int_short(n):
+    """Short integer formatting: 34k, 1.2M, etc."""
+    try:
+        v = float(n)
+    except Exception:
+        return "-"
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+
+    if a >= 1e9:
+        val = a / 1e9
+        s = f"{val:.1f}G"
+    elif a >= 1e6:
+        val = a / 1e6
+        s = f"{val:.1f}M"
+    elif a >= 1e3:
+        val = a / 1e3
+        s = f"{val:.0f}k"
+    else:
+        return f"{int(round(v))}"
+
+    if s.endswith(".0G") or s.endswith(".0M"):
+        s = s.replace(".0", "")
+    return sign + s
+
+
 def fmt_gbp(x):
     try:
         v = float(x)
@@ -340,6 +362,8 @@ def _load_blocks():
     global block_counts, last_block_ts, last_any_block_ts, reported_last, week_start_counts, week_start_unix
 
     def parse(data):
+        global block_counts, last_block_ts, last_any_block_ts, reported_last, week_start_counts, week_start_unix
+
         if not isinstance(data, dict):
             return False
 
@@ -456,6 +480,45 @@ def _save_weekly_best():
     _safe_write_json(WEEKLY_BEST_FILE, weekly_best)
 
 
+def _load_weekly_current():
+    """Load per-miner current-week best diffs."""
+    global weekly_current
+    data = _safe_read_json(WEEKLY_CURRENT_FILE) or _safe_read_json(WEEKLY_CURRENT_FILE + ".bak")
+    if not isinstance(data, dict):
+        weekly_current = {}
+        return
+
+    stored_week = data.get("week_start_unix")
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+
+    try:
+        stored_week_int = int(stored_week) if stored_week is not None else None
+    except Exception:
+        stored_week_int = None
+
+    # If the week_start_unix changed, treat it as a new week and discard old values
+    if stored_week_int is not None and isinstance(week_start_unix, (int, float)):
+        if int(week_start_unix) != stored_week_int:
+            weekly_current = {}
+            return
+
+    cleaned = {}
+    for k, v in current.items():
+        try:
+            cleaned[str(k)] = float(v)
+        except Exception:
+            continue
+    weekly_current = cleaned
+
+
+def _save_weekly_current():
+    obj = {
+        "week_start_unix": week_start_unix,
+        "current": weekly_current,
+    }
+    _safe_write_json(WEEKLY_CURRENT_FILE, obj)
+
+
 def _load_motw():
     global motw
     data = _safe_read_json(MOTW_FILE) or _safe_read_json(MOTW_FILE + ".bak")
@@ -530,11 +593,14 @@ def poll_miner_api(ip: str):
             session_best = best_overall
 
         shares_accepted = pick_first(js, ["sharesAccepted"], None)
+        shares_rejected = pick_first(js, ["sharesRejected", "rejectedShares", "sharesRejectedTotal"], None)
         uptime_seconds = pick_first(js, ["uptimeSeconds"], None)
 
         # Some miners expose a block counter (often "blockFound"); we treat any increase as a block event,
         # and any decrease as a reset (baseline update only).
         blocks_found = pick_first(js, ["blockFound", "blocksFound", "blocks_found", "foundBlocks", "blocks"], None)
+
+        fan_speed = pick_first(js, ["fanspeed", "fanSpeed", "fan_speed", "fanPercent", "fan_percent"], None)
 
         return {
             "online": True,
@@ -542,10 +608,12 @@ def poll_miner_api(ip: str):
             "asic_temp": pick_first(js, ["temp", "asicTemp", "asic_temp"], None),
             "vr_temp": pick_first(js, ["vrTemp", "vr_temp", "vr"], None),
             "shares_accepted": shares_accepted,
+            "shares_rejected": shares_rejected,
             "session_best": session_best,
             "best_overall": best_overall,
             "uptime_seconds": uptime_seconds,
             "blocks_found": blocks_found,
+            "fan_speed": fan_speed,
         }
     except Exception:
         return {"online": False}
@@ -607,6 +675,16 @@ def miner_loop():
             with _last_seen_lock:
                 last_seen = last_seen_ts.get(label)
 
+            # Weekly best diff tracking (reset-safe & persisted)
+            sb_raw = diff_to_number(data.get("session_best"))
+            with _weekly_lock:
+                current_val = weekly_current.get(label)
+                if sb_raw is not None:
+                    if current_val is None or sb_raw > current_val:
+                        weekly_current[label] = sb_raw
+                        _save_weekly_current()
+                week_val = weekly_current.get(label, sb_raw)
+
             new_state[name] = {
                 "name": label,
                 "ip": ip,
@@ -616,11 +694,14 @@ def miner_loop():
                 "asic_temp": data.get("asic_temp", None),
                 "vr_temp": data.get("vr_temp", None),
                 "shares_accepted": data.get("shares_accepted", None),
-                "session_best": data.get("session_best", None),
+                "shares_rejected": data.get("shares_rejected", None),
+                "session_best": data.get("session_best", None),  # raw from miner
+                "weekly_best": week_val,                         # our reset-safe weekly best
                 "best_overall": data.get("best_overall", None),
                 "uptime_seconds": data.get("uptime_seconds", None),
                 "blocks": int(block_counts.get(label, 0)),
                 "last_seen_unix": last_seen,
+                "fan_speed": data.get("fan_speed", None),
             }
 
         miners_state = new_state
@@ -683,7 +764,7 @@ def compute_motw_for_last_week(snapshot_miners):
         start_blocks = int(wsc.get(name, 0) or 0)
         blocks_week = max(0, blocks_total - start_blocks)
 
-        weekly_best_raw = diff_to_number(m.get("session_best"))
+        weekly_best_raw = diff_to_number(m.get("session_best"))  # raw from miner for that past week
         weekly_best_raw = float(weekly_best_raw) if weekly_best_raw is not None else 0.0
 
         hr = m.get("hashrate_ths")
@@ -779,7 +860,7 @@ def compute_motw_for_last_week(snapshot_miners):
 
 
 def weekly_rollover_loop():
-    global weekly_best, motw, week_start_counts, week_start_unix
+    global weekly_best, motw, week_start_counts, week_start_unix, weekly_current
 
     last_run_week = None
     while True:
@@ -791,7 +872,7 @@ def weekly_rollover_loop():
             if last_run_week != (iso_year, iso_week):
                 snapshot = list(miners_state.values())
 
-                # Weekly best diff
+                # Weekly best diff (for previous week banner)
                 best_val = None
                 best_name = None
                 for m in snapshot:
@@ -823,11 +904,14 @@ def weekly_rollover_loop():
                         }
                         _save_motw()
 
-                # Reset weekly baseline counts
+                # Reset weekly baseline counts + weekly best diffs
                 with _blocks_lock:
                     week_start_unix = int(time.time())
                     week_start_counts = dict(block_counts)
                     _save_blocks()
+                with _weekly_lock:
+                    weekly_current = {}
+                    _save_weekly_current()
 
                 # Restart miners
                 for _, cfg in MINERS.items():
@@ -1038,7 +1122,9 @@ def data():
     }
 
     for _, m in miners_state.items():
-        sb_raw_num = diff_to_number(m.get("session_best"))
+        weekly_raw = diff_to_number(m.get("weekly_best"))
+        if weekly_raw is None:
+            weekly_raw = diff_to_number(m.get("session_best"))
         bo_raw_num = diff_to_number(m.get("best_overall"))
 
         out["miners"].append(
@@ -1052,9 +1138,13 @@ def data():
                 "temp": fmt_temp_pair(m.get("asic_temp"), m.get("vr_temp")),
                 "asic_temp_raw": m.get("asic_temp"),
                 "vr_temp_raw": m.get("vr_temp"),
-                "shares_accepted": fmt_int(m.get("shares_accepted")) if m.get("shares_accepted") is not None else "-",
-                "session_best": fmt_diff_si_adaptive(m.get("session_best")) if m.get("session_best") is not None else "-",
-                "session_best_raw": sb_raw_num,
+                "fan_speed": m.get("fan_speed"),
+                "shares_accepted": fmt_int_short(m.get("shares_accepted")) if m.get("shares_accepted") is not None else "-",
+                "shares_accepted_raw": m.get("shares_accepted"),
+                "shares_rejected": fmt_int_short(m.get("shares_rejected")) if m.get("shares_rejected") is not None else "0",
+                "shares_rejected_raw": m.get("shares_rejected"),
+                "session_best": fmt_diff_si_adaptive(weekly_raw) if weekly_raw is not None else "-",
+                "session_best_raw": weekly_raw,
                 "best_overall": fmt_diff_si_adaptive(m.get("best_overall")) if m.get("best_overall") is not None else "-",
                 "best_overall_raw": bo_raw_num,
                 "blocks": int(m.get("blocks", 0)),
@@ -1542,9 +1632,17 @@ function tempHTML(m) {
   const vNum = Number(m.vr_temp_raw);
   const left  = Number.isFinite(aNum) ? Math.round(aNum) + '°' : '-';
   const right = Number.isFinite(vNum) ? Math.round(vNum) + '°' : '-';
-  return '<span class="' + tempClass + '">' + left + '</span>' +
-         '<span class="slash">/</span>' +
-         '<span class="' + tempClass + '">' + right + '</span>';
+
+  let base = '<span class="' + tempClass + '">' + left + '</span>' +
+             '<span class="slash">/</span>' +
+             '<span class="' + tempClass + '">' + right + '</span>';
+
+  const fNum = Number(m.fan_speed);
+  if (Number.isFinite(fNum)) {
+    base += '<span class="slash">/</span>' +
+            '<span>' + Math.round(fNum) + '%</span>';
+  }
+  return base;
 }
 
 function sessionBestHTML(m, isTopWeekly, isTopBest) {
@@ -1568,6 +1666,28 @@ function rankIconForIndex(idx) {
   if (idx === 1) return "🥈";
   if (idx === 2) return "🥉";
   return "👷";
+}
+
+function sharesRejectedText(m) {
+  const rejStr = m.shares_rejected || '0';
+
+  const accRaw = Number(m.shares_accepted_raw);
+  const rejRaw = Number(m.shares_rejected_raw);
+  let pctStr = '-';
+
+  if (Number.isFinite(accRaw) && Number.isFinite(rejRaw)) {
+    const total = accRaw + rejRaw;
+    if (total > 0) {
+      const pct = (rejRaw / total) * 100;
+      if (pct < 10) {
+        pctStr = pct.toFixed(2) + '%';
+      } else {
+        pctStr = pct.toFixed(1) + '%';
+      }
+    }
+  }
+
+  return rejStr + ' / ' + pctStr;
 }
 
 function minerRowHTML(m, globalIdx, topWeeklyName, topBestName, isSliding, blockLeaderName) {
@@ -1605,8 +1725,11 @@ function minerRowHTML(m, globalIdx, topWeeklyName, topBestName, isSliding, block
   html += '</div>';
 
   html += '<div class="' + cardClass + '"><div class="label">HASHRATE</div><div class="valueBig">' + (m.hashrate || '-') + '</div></div>';
-  html += '<div class="' + cardClass + '"><div class="label">ASIC / VR</div><div class="valueBig">' + tempHTML(m) + '</div></div>';
-  html += '<div class="' + cardClass + '"><div class="label">SHARES</div><div class="valueBig">' + (m.shares_accepted || '-') + '</div></div>';
+  html += '<div class="' + cardClass + '"><div class="label">ASIC / VR / FAN</div><div class="valueBig">' + tempHTML(m) + '</div></div>';
+
+  const sharesText = sharesRejectedText(m);
+  html += '<div class="' + cardClass + '"><div class="label">SHARES REJECTED</div><div class="valueBig">' + sharesText + '</div></div>';
+
   html += '<div class="' + cardClass + '"><div class="label">WEEKLY / BEST</div><div class="valueBig">' + sessionBestHTML(m, isTopWeekly, isTopBest) + '</div></div>';
   html += '</div>';
   return html;
@@ -1960,9 +2083,10 @@ if __name__ == "__main__":
     _load_blocks()
     _load_weekly_best()
     _load_motw()
+    _load_weekly_current()
 
+    # Make sure weekly baseline is initialised safely
     with _blocks_lock:
-        global week_start_unix, week_start_counts
         if week_start_unix is None:
             week_start_unix = int(time.time())
         if not isinstance(week_start_counts, dict) or not week_start_counts:
@@ -1973,5 +2097,5 @@ if __name__ == "__main__":
     threading.Thread(target=coin_loop, daemon=True).start()
     threading.Thread(target=weekly_rollover_loop, daemon=True).start()
 
-    # 👇 Keep this exactly like this
+    # 👇 Keep this exactly like this (matches your service config)
     app.run(host="0.0.0.0", port=8788)
