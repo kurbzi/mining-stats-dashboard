@@ -55,7 +55,7 @@ understand and accept the security implications.
 - Block popup overlay when a miner finds a block  
 - Auto Sunday-night weekly rollover (resets weekly stats, computes winners, restarts miners)  
 - Discord webhook notifications for block found events  
-- Fully self-contained single Python file (`ticker.py`)  
+- Fully self-contained single Python file (`MSD.py`)  
 - No database required  
 
 ---
@@ -214,4 +214,5 @@ This project is free and open source.
 If it’s helped you keep your farm happy, you can optionally send a donation:
 
 BTC: bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
+
 
