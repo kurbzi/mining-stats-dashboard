@@ -1,4 +1,4 @@
-# Mining Stats Dashboard (v1.0.1)
+# Mining Stats Dashboard (v1.0.2)
 
 ![Mining Stats Dashboard](dashboard.jpg)
 
@@ -55,7 +55,7 @@ understand and accept the security implications.
 - Block popup overlay when a miner finds a block  
 - Auto Sunday-night weekly rollover (resets weekly stats, computes winners, restarts miners)  
 - Discord webhook notifications for block found events  
-- Fully self-contained single Python file (`MSD.py`)  
+- Fully self-contained single Python file (`ticker.py`)  
 - No database required  
 
 ---
@@ -123,12 +123,24 @@ understand and accept the security implications.
     - Average and max temperatures across all miners  
 
 **File / script changes**
- 
+
+- Main script is now **`ticker.py`**, not `MSD.py`.  
 - Uses JSON files in the same directory for persistence:
   - `blocks.json` / `blocks.json.bak`  
   - `weekly_best.json` / `weekly_best.json.bak`  
   - `weekly_current.json` / `weekly_current.json.bak`  
   - `miner_of_week.json` / `miner_of_week.json.bak`  
+
+## What’s new in v1.0.2
+
+- Configurable fiat currency (code + symbol) for all coin prices.
+- Configurable temperature thresholds for the colour indicators.
+- Cleaner, generic “Pool: host:port” mining display (not tied to any specific coin).
+- New ticker items for total hashrate, total estimated power, efficiency and temperatures.
+- Maintenance countdown in the ticker based on `MAINTENANCE_CYCLE_DAYS`.
+- Miner of the Week summary line, calculated from blocks, difficulty, hashrate, shares and uptime.
+- Block-found popup overlay when any miner’s block count increases.
+
 
 ---
 
@@ -159,25 +171,37 @@ python3 -m pip install -r requirements.txt
 ``` 
 2. Configure the dashboard
 
-Open ticker.py in a text editor and edit only the CONFIG SECTION at the top:
+## Configuration
 
-Replace example IP addresses with your actual miner IPs:
+Edit the **CONFIG SECTION** at the top of `MSD.py`:
 
-192.168.0.XXX → your miners’ LAN IPs
+```python
+# Polling
+REFRESH_SECONDS = 5            # How often to poll miners
+COIN_REFRESH_SECONDS = 30      # How often to refresh prices/difficulty
 
-Replace miner labels with your preferred names:
+# Stale data thresholds
+STALE_YELLOW_SECONDS = 20
+STALE_RED_SECONDS = 60
 
-"Miner 1 Name", "Miner 2 Name", etc.
+# Temperature thresholds (colour changes)
+TEMP_ORANGE_AT = 67
+TEMP_RED_AT = 70
 
-(Optional) Set the model for each miner:
+# Currency
+CURRENCY_CODE = "GBP"          # e.g. "GBP", "USD", "EUR"
+CURRENCY_SYMBOL = "£"          # e.g. "£", "$", "€"
 
-Used only for Miner of the Week baseline scoring.
+# Maintenance countdown (for ticker text only)
+MAINTENANCE_CYCLE_DAYS = 56    # e.g. 8-week cycle
 
-(Optional) Paste your Discord webhook URL into:
-
-DISCORD_WEBHOOK_URL = "PASTE_WEBHOOK_HERE"
-
-Save the file when finished.
+# Miner definitions
+MINERS = {
+    "Miner1": {"ip": "192.168.0.130", "label": "Miner1", "model": "Nerd"},
+    "Miner2": {"ip": "192.168.0.126", "label": "Miner2", "model": "Nerd"},
+    "Miner3": {"ip": "192.168.0.106", "label": "Miner3", "model": "Nerd"},
+    "Miner4": {"ip": "192.168.0.191", "label": "Miner4", "model": "Gamma"},
+}
 
 3. Run the dashboard
 
@@ -214,5 +238,3 @@ This project is free and open source.
 If it’s helped you keep your farm happy, you can optionally send a donation:
 
 BTC: bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
-
-
