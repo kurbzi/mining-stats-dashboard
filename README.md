@@ -140,6 +140,7 @@ understand and accept the security implications.
 - Maintenance countdown in the ticker based on `MAINTENANCE_CYCLE_DAYS`.
 - Miner of the Week summary line, calculated from blocks, difficulty, hashrate, shares and uptime.
 - Block-found popup overlay when any miner’s block count increases.
+- Displays correctly on PC/Laptop Browsers to show more Miners
 
 
 ---
@@ -238,3 +239,4 @@ This project is free and open source.
 If it’s helped you keep your farm happy, you can optionally send a donation:
 
 BTC: bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
+
