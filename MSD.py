@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================
-# Mining Stats Dashboard — v1.0.1
+# Mining Stats Dashboard — v1.0.2 (public)
 # Author: kurbzi
 # License: MIT
 #
 # ✅ Edit only the CONFIG SECTION below.
 # ⚠️ DO NOT EDIT BELOW THAT LINE unless you know what you're doing.
-#
-# NOTE ABOUT BLOCK COUNTS:
-# - This dashboard increments "Blocks" when a miner exposes a block counter in /api/system/info
-#   (commonly "blockFound" / "blocksFound" etc).
-# - Some NerdOS/AxeOS builds may require enabling "Block Found Alerts" (or similar) in the miner UI
-#   to ensure the block counter/alerts are active and updated.
-# - If your miner does NOT expose a block counter, blocks will remain 0 unless you add another source
-#   (e.g. pool-side checks or webhooks) in a future version.
 # ============================================================
 
 # =========================
@@ -31,69 +23,78 @@ STALE_YELLOW_SECONDS = 20
 STALE_RED_SECONDS = 60
 
 # Temperature color thresholds
-TEMP_ORANGE_AT = 66
-TEMP_RED_AT = 75
+TEMP_ORANGE_AT = 67
+TEMP_RED_AT = 70
 
-# Miner page rotation (seconds): how long each group of miners stays on screen
+# Currency for prices (CoinGecko vs_currency)
+# Examples:
+#   CURRENCY_CODE   CURRENCY_SYMBOL
+#   "GBP"           "£"
+#   "USD"           "$"
+#   "EUR"           "€"
+CURRENCY_CODE = "GBP"
+CURRENCY_SYMBOL = "£"
+
+# Rotating row interval (seconds)
+# - Top N-1 miners stay fixed
+# - The last visible row rotates through remaining miners every N seconds
 MINER_PAGE_SECONDS = 10
 
-# Miners shown per page
+# Not used for paging anymore, kept as a visible config hint
 MINERS_PER_PAGE = 3
+
+# Maintenance countdown cycle length (days) — used only for ticker text
+# Example: 56 = 8-week cycle
+MAINTENANCE_CYCLE_DAYS = 56
+
+# ✅ How much uptime must drop to count as a reboot (seconds)
+REBOOT_UPTIME_DROP_SECONDS = 45
 
 # ------------------------------------------------------------
 # MINERS (EDIT THESE)
 # ------------------------------------------------------------
-# ✅ Replace the "label" with your miner name (what you want to see on the dashboard).
-# ✅ Replace the "ip" with your miner IP address.
-#
-# OPTIONAL:
-# ✅ "model" is only used for Miner of the Week scoring (to compare performance vs a baseline).
-#    - If you don't care about MOTW scoring, you can remove the "model" line entirely.
-#    - If you DO want scoring, set "model" to any name you like (e.g. "MyModel").
-#      Just make sure the same model name exists in MODEL_BASELINES.
-#
 MINERS = {
     "Miner1": {
-        "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
-        "label": "Miner 1 Name",    # <<< PASTE MINER NAME HERE
-        "model": "MyModel",         # <<< OPTIONAL: used only for Miner of the Week scoring
+        "ip": "192.168.0.130",
+        "label": "Miner1",
+        "model": "Nerd",
     },
     "Miner2": {
-        "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
-        "label": "Miner 2 Name",    # <<< PASTE MINER NAME HERE
-        "model": "MyModel",         # <<< OPTIONAL
+        "ip": "192.168.0.126",
+        "label": "Miner2",
+        "model": "Nerd",
     },
     "Miner3": {
-        "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
-        "label": "Miner 3 Name",    # <<< PASTE MINER NAME HERE
-        "model": "AnotherModel",    # <<< OPTIONAL
+        "ip": "192.168.0.106",
+        "label": "Miner3",
+        "model": "Nerd",
     },
     "Miner4": {
-        "ip": "192.168.0.XXX",      # <<< PASTE IP ADDRESS HERE
-        "label": "Miner 4 Name",    # <<< PASTE MINER NAME HERE
-        "model": "AnotherModel",    # <<< OPTIONAL
-        # No model = no baseline scoring for MOTW (still eligible via blocks/diff/uptime components)
+        "ip": "192.168.0.191",
+        "label": "Miner4",
+        "model": "Gamma",
     },
 }
 
 # ------------------------------------------------------------
 # BASELINES (EDIT IF YOU WANT)
 # ------------------------------------------------------------
-# Used for Miner of the Week scoring. You can rename these model keys to anything.
 MODEL_BASELINES = {
-    "MyModel": {"baseline_ths": 5.00, "baseline_shares_per_hour": 40.0},
-    "AnotherModel": {"baseline_ths": 1.15, "baseline_shares_per_hour": 30.0},
+    "Nerd": {"baseline_ths": 5.00, "baseline_shares_per_hour": 40.0},
+    "Gamma": {"baseline_ths": 1.25, "baseline_shares_per_hour": 10.0},
 }
 
 # ------------------------------------------------------------
 # DISCORD WEBHOOK (OPTIONAL)
 # ------------------------------------------------------------
-DISCORD_WEBHOOK_URL = "PASTE_WEBHOOK_HERE"
+# Put your webhook URL here, or leave blank/placeholder to disable.
+DISCORD_WEBHOOK_URL = "PASTE_DISCORD_WEBHOOK_HERE"
 
 # ------------------------------------------------------------
-# COINS (POPULAR DEFAULTS)
+# COINS (UPDATED)
 # ------------------------------------------------------------
-COIN_ORDER = ["BTC", "BCH", "FB", "DGB"]
+# Ticker order for the top ticker
+COIN_ORDER = ["BTC", "BCH", "FB", "DGB", "CAS", "CHTA", "XMR", "QUAI"]
 
 # Web server settings
 HOST = "0.0.0.0"
@@ -103,7 +104,7 @@ PORT = 8788
 # DO NOT EDIT BELOW THIS LINE
 # =========================
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, jsonify, Response
 import time
 import threading
 import requests
@@ -111,15 +112,17 @@ from datetime import datetime
 import os
 import json
 import re
-from typing import Optional
 
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 BLOCKS_FILE = os.path.join(BASE_DIR, "blocks.json")
-WEEKLY_BEST_FILE = os.path.join(BASE_DIR, "weekly_best.json")       # previous week's winner summary
-WEEKLY_CURRENT_FILE = os.path.join(BASE_DIR, "weekly_current.json") # per-miner current-week best diffs
+LEGACY_BLOCKS_FILE = "blocks.json"
+
+WEEKLY_BEST_FILE = os.path.join(BASE_DIR, "weekly_best.json")
+WEEKLY_CURRENT_FILE = os.path.join(BASE_DIR, "weekly_current.json")
 MOTW_FILE = os.path.join(BASE_DIR, "miner_of_week.json")
+MAINT_FILE = os.path.join(BASE_DIR, "maintenance.json")
 
 IP_TO_LABEL = {cfg["ip"]: cfg.get("label", name) for name, cfg in MINERS.items()}
 
@@ -127,19 +130,19 @@ miners_state = {}
 last_block_popup = None  # {"miner": "...", "ts_unix": int, "is_test": bool}
 
 _blocks_lock = threading.Lock()
-block_counts = {}
-last_block_ts = {}
+block_counts = {}        # keyed by IP
+last_block_ts = {}       # keyed by IP
 last_any_block_ts = None
 
-# Reset-safe tracking for miner-reported counters (e.g. miners that expose "blockFound")
-reported_last = {}  # { "Miner Label": last_seen_reported_int }
+reported_last = {}  # keyed by IP
 
-# Weekly baseline block counts (to compute weekly blocks)
 week_start_counts = {}
 week_start_unix = None
 
 _coin_lock = threading.Lock()
-coin_state = {sym: {"price_gbp": None, "diff": None} for sym in COIN_ORDER}
+# Internally we track generic price/diff;
+# we still export price_gbp/price_gbp_raw to the frontend for compatibility.
+coin_state = {sym: {"price": None, "diff": None} for sym in COIN_ORDER}
 coin_last_ok_unix = None
 coin_last_err = None
 
@@ -149,14 +152,20 @@ logos_last_ok_unix = None
 logos_last_err = None
 
 _last_seen_lock = threading.Lock()
-last_seen_ts = {}
+last_seen_ts = {}  # keyed by display name (hostname/label), ephemeral
 
 _weekly_lock = threading.Lock()
 weekly_best = {"prev_name": None, "prev_value": None, "prev_str": None}
-weekly_current = {}  # { miner_name: numeric best diff for THIS week }
+weekly_current = {}  # { ip: numeric best diff for THIS week }
+
+_uptime_lock = threading.Lock()
+last_uptime_seen = {}  # keyed by IP -> int uptime seconds last seen
 
 _motw_lock = threading.Lock()
 motw = {"prev_name": None, "prev_score": None, "prev_str": None, "prev_week_iso": None}
+
+maintenance_base_unix = None  # anchor for maintenance countdown
+
 
 # =========================
 # HELPERS
@@ -271,16 +280,7 @@ def fmt_diff_si(n):
     return f"{v:.2f}"
 
 
-def fmt_int(n):
-    try:
-        v = int(float(n))
-        return f"{v:,}"
-    except Exception:
-        return "-"
-
-
 def fmt_int_short(n):
-    """Short integer formatting: 34k, 1.2M, etc."""
     try:
         v = float(n)
     except Exception:
@@ -305,16 +305,18 @@ def fmt_int_short(n):
     return sign + s
 
 
-def fmt_gbp(x):
+def fmt_fiat(x):
+    """Generic fiat formatter using CURRENCY_SYMBOL."""
     try:
         v = float(x)
     except Exception:
         return "-"
+    sym = CURRENCY_SYMBOL or ""
     if v >= 1:
-        return f"£{v:,.2f}"
+        return f"{sym}{v:,.2f}"
     if v >= 0.01:
-        return f"£{v:,.4f}"
-    return f"£{v:.6f}"
+        return f"{sym}{v:,.4f}"
+    return f"{sym}{v:.6f}"
 
 
 def pick_first(js, keys, default=None):
@@ -419,7 +421,6 @@ def _load_blocks():
             week_start_counts = week_start_counts_local
             return True
 
-        # legacy: dict of counts
         cleaned = {}
         for k, v in data.items():
             try:
@@ -427,20 +428,48 @@ def _load_blocks():
             except Exception:
                 cleaned[str(k)] = 0
 
-        block_counts = cleaned
+        ips = {cfg["ip"] for cfg in MINERS.values()}
+        name_to_ip = {name: cfg["ip"] for name, cfg in MINERS.items()}
+        label_to_ip = {cfg.get("label", name): cfg["ip"] for name, cfg in MINERS.items()}
+
+        has_ip_key = any(k in ips for k in cleaned.keys())
+        has_name_key = any(k in name_to_ip or k in label_to_ip for k in cleaned.keys())
+
+        if has_ip_key:
+            block_counts = cleaned
+        elif has_name_key:
+            migrated = {}
+            for k, v in cleaned.items():
+                ip = None
+                if k in name_to_ip:
+                    ip = name_to_ip[k]
+                elif k in label_to_ip:
+                    ip = label_to_ip[k]
+                if ip is not None:
+                    migrated[ip] = v
+            block_counts = migrated
+        else:
+            block_counts = cleaned
+
         last_block_ts = {}
         last_any_block_ts = None
         reported_last = {}
         week_start_unix = int(time.time())
-        week_start_counts = dict(block_counts)
+        week_start_counts = {}
         return True
 
     data = _safe_read_json(BLOCKS_FILE)
-    ok = parse(data)
+    if data is None:
+        if os.path.abspath(LEGACY_BLOCKS_FILE) != os.path.abspath(BLOCKS_FILE):
+            data = _safe_read_json(LEGACY_BLOCKS_FILE)
+
+    ok = parse(data) if data is not None else False
 
     if not ok:
         data_bak = _safe_read_json(BLOCKS_FILE + ".bak")
-        ok = parse(data_bak)
+        if data_bak is None and os.path.abspath(LEGACY_BLOCKS_FILE) != os.path.abspath(BLOCKS_FILE):
+            data_bak = _safe_read_json(LEGACY_BLOCKS_FILE + ".bak")
+        ok = parse(data_bak) if data_bak is not None else False
 
     if not ok:
         block_counts = {}
@@ -481,7 +510,6 @@ def _save_weekly_best():
 
 
 def _load_weekly_current():
-    """Load per-miner current-week best diffs."""
     global weekly_current
     data = _safe_read_json(WEEKLY_CURRENT_FILE) or _safe_read_json(WEEKLY_CURRENT_FILE + ".bak")
     if not isinstance(data, dict):
@@ -496,7 +524,6 @@ def _load_weekly_current():
     except Exception:
         stored_week_int = None
 
-    # If the week_start_unix changed, treat it as a new week and discard old values
     if stored_week_int is not None and isinstance(week_start_unix, (int, float)):
         if int(week_start_unix) != stored_week_int:
             weekly_current = {}
@@ -537,9 +564,24 @@ def _save_motw():
     _safe_write_json(MOTW_FILE, motw)
 
 
+def _load_maintenance():
+    global maintenance_base_unix
+    data = _safe_read_json(MAINT_FILE) or _safe_read_json(MAINT_FILE + ".bak")
+    if isinstance(data, dict):
+        val = data.get("base_unix")
+        try:
+            maintenance_base_unix = int(val) if val is not None else None
+        except Exception:
+            maintenance_base_unix = None
+
+    if maintenance_base_unix is None:
+        maintenance_base_unix = int(time.time())
+        _safe_write_json(MAINT_FILE, {"base_unix": maintenance_base_unix})
+
+
 def send_discord_block_found(miner_name: str, when_hms: str, is_test: bool = False,
-                            share_diff=None, network_diff=None):
-    if not DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL.strip() == "PASTE_WEBHOOK_HERE":
+                             share_diff=None, network_diff=None):
+    if not DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL.strip() == "" or "PASTE_DISCORD_WEBHOOK_HERE" in DISCORD_WEBHOOK_URL:
         return
 
     prefix = "🧪 **TEST WEBHOOK**" if is_test else "🧱 **BLOCK FOUND!**"
@@ -576,6 +618,8 @@ def poll_miner_api(ip: str):
         gh = pick_first(js, ["hashRate", "hashRate_1m", "hashrate", "hashrate_1m"], None)
         ths = (float(gh) / 1000.0) if gh is not None else None
 
+        hostname = pick_first(js, ["hostname", "hostName", "name"], None)
+
         session_best = pick_first(
             js,
             ["bestSessionDiff", "best_session_diff", "sessionBestDiff", "session_best_diff", "bestDiff", "best_diff"],
@@ -596,14 +640,27 @@ def poll_miner_api(ip: str):
         shares_rejected = pick_first(js, ["sharesRejected", "rejectedShares", "sharesRejectedTotal"], None)
         uptime_seconds = pick_first(js, ["uptimeSeconds"], None)
 
-        # Some miners expose a block counter (often "blockFound"); we treat any increase as a block event,
-        # and any decrease as a reset (baseline update only).
         blocks_found = pick_first(js, ["blockFound", "blocksFound", "blocks_found", "foundBlocks", "blocks"], None)
 
         fan_speed = pick_first(js, ["fanspeed", "fanSpeed", "fan_speed", "fanPercent", "fan_percent"], None)
 
+        power_raw = pick_first(js, ["power", "powerW", "power_watts"], None)
+        voltage = pick_first(js, ["voltage", "volt", "volts"], None)
+        currentA = pick_first(js, ["currentA", "current_a", "current"], None)
+
+        # Generic stratum info
+        stratum_url = pick_first(js, ["stratumURL", "stratumUrl", "poolURL", "stratum_url", "pool_url"], None)
+        stratum_port = pick_first(js, ["stratumPort", "stratum_port", "poolPort", "pool_port"], None)
+        stratum_user = pick_first(js, ["stratumUser", "stratum_user", "worker", "user"], None)
+
+        using_fallback = pick_first(js, ["usingFallback", "isUsingFallback"], None)
+        fallback_stratum_url = pick_first(js, ["fallbackStratumURL", "fallback_stratum_url"], None)
+        fallback_stratum_port = pick_first(js, ["fallbackStratumPort", "fallback_stratum_port"], None)
+        is_using_fallback_stratum = pick_first(js, ["isUsingFallbackStratum", "is_using_fallback_stratum"], None)
+
         return {
             "online": True,
+            "hostname": hostname,
             "hashrate_ths": ths,
             "asic_temp": pick_first(js, ["temp", "asicTemp", "asic_temp"], None),
             "vr_temp": pick_first(js, ["vrTemp", "vr_temp", "vr"], None),
@@ -614,6 +671,16 @@ def poll_miner_api(ip: str):
             "uptime_seconds": uptime_seconds,
             "blocks_found": blocks_found,
             "fan_speed": fan_speed,
+            "power_raw": power_raw,
+            "voltage": voltage,
+            "currentA": currentA,
+            "stratum_url": stratum_url,
+            "stratum_port": stratum_port,
+            "stratum_user": stratum_user,
+            "using_fallback": using_fallback,
+            "fallback_stratum_url": fallback_stratum_url,
+            "fallback_stratum_port": fallback_stratum_port,
+            "is_using_fallback_stratum": is_using_fallback_stratum,
         }
     except Exception:
         return {"online": False}
@@ -627,17 +694,32 @@ def miner_loop():
 
         for name, cfg in MINERS.items():
             ip = cfg["ip"]
-            label = cfg.get("label", name)
-            model = cfg.get("model")
+            fallback_label = cfg.get("label", name)
+
             data = poll_miner_api(ip)
+
+            hostname = data.get("hostname")
+            display_name = hostname or fallback_label
+            model = cfg.get("model")
+            key_ip = ip
 
             if data.get("online"):
                 with _last_seen_lock:
-                    last_seen_ts[label] = now_unix
+                    last_seen_ts[display_name] = now_unix
 
-            # Block logic: reset-safe tracking of reported "blocks_found"
+            up_raw = data.get("uptime_seconds")
+            up_now = None
+            try:
+                up_now = int(float(up_raw)) if up_raw is not None else None
+            except Exception:
+                up_now = None
+
+            if data.get("online") and up_now is not None:
+                with _uptime_lock:
+                    last_uptime_seen[key_ip] = up_now
+
             with _blocks_lock:
-                blocks = int(block_counts.get(label, 0))
+                blocks = int(block_counts.get(key_ip, 0))
 
                 reported = data.get("blocks_found")
                 try:
@@ -646,47 +728,46 @@ def miner_loop():
                     reported_int = None
 
                 if reported_int is not None:
-                    prev_rep = reported_last.get(label)
+                    prev_rep = reported_last.get(key_ip)
 
                     if prev_rep is None:
-                        reported_last[label] = reported_int
+                        reported_last[key_ip] = reported_int
                         _save_blocks()
                     else:
                         if reported_int < prev_rep:
-                            # miner reset: update baseline only
-                            reported_last[label] = reported_int
+                            reported_last[key_ip] = reported_int
                             _save_blocks()
                         elif reported_int > prev_rep:
                             delta = reported_int - prev_rep
-                            reported_last[label] = reported_int
+                            reported_last[key_ip] = reported_int
 
                             blocks += delta
-                            block_counts[label] = blocks
-                            last_block_ts[label] = now_unix
+                            block_counts[key_ip] = blocks
+                            last_block_ts[key_ip] = now_unix
                             last_any_block_ts = now_unix
                             _save_blocks()
 
                             ts_hms = now_hms()
                             for _ in range(delta):
-                                send_discord_block_found(label, ts_hms, is_test=False)
+                                send_discord_block_found(display_name, ts_hms, is_test=False)
 
-                            last_block_popup = {"miner": label, "ts_unix": now_unix, "is_test": False}
+                            last_block_popup = {"miner": display_name, "ts_unix": now_unix, "is_test": False}
 
             with _last_seen_lock:
-                last_seen = last_seen_ts.get(label)
+                last_seen = last_seen_ts.get(display_name)
 
-            # Weekly best diff tracking (reset-safe & persisted)
             sb_raw = diff_to_number(data.get("session_best"))
             with _weekly_lock:
-                current_val = weekly_current.get(label)
+                wk_key = key_ip
+                current_val = weekly_current.get(wk_key)
                 if sb_raw is not None:
                     if current_val is None or sb_raw > current_val:
-                        weekly_current[label] = sb_raw
+                        weekly_current[wk_key] = sb_raw
                         _save_weekly_current()
-                week_val = weekly_current.get(label, sb_raw)
+                week_val = weekly_current.get(wk_key, sb_raw)
 
             new_state[name] = {
-                "name": label,
+                "name": display_name,
                 "ip": ip,
                 "model": model,
                 "online": data.get("online", False),
@@ -695,13 +776,23 @@ def miner_loop():
                 "vr_temp": data.get("vr_temp", None),
                 "shares_accepted": data.get("shares_accepted", None),
                 "shares_rejected": data.get("shares_rejected", None),
-                "session_best": data.get("session_best", None),  # raw from miner
-                "weekly_best": week_val,                         # our reset-safe weekly best
+                "session_best": data.get("session_best", None),
+                "weekly_best": week_val,
                 "best_overall": data.get("best_overall", None),
                 "uptime_seconds": data.get("uptime_seconds", None),
-                "blocks": int(block_counts.get(label, 0)),
+                "blocks": int(block_counts.get(key_ip, 0)),
                 "last_seen_unix": last_seen,
                 "fan_speed": data.get("fan_speed", None),
+                "power_raw": data.get("power_raw"),
+                "voltage": data.get("voltage"),
+                "currentA": data.get("currentA"),
+                "stratum_url": data.get("stratum_url"),
+                "stratum_port": data.get("stratum_port"),
+                "stratum_user": data.get("stratum_user"),
+                "using_fallback": data.get("using_fallback"),
+                "fallback_stratum_url": data.get("fallback_stratum_url"),
+                "fallback_stratum_port": data.get("fallback_stratum_port"),
+                "is_using_fallback_stratum": data.get("is_using_fallback_stratum"),
             }
 
         miners_state = new_state
@@ -757,14 +848,15 @@ def compute_motw_for_last_week(snapshot_miners):
 
     for m in snapshot_miners:
         name = m.get("name")
+        ip = m.get("ip")
         model = m.get("model") or ""
         model_cfg = MODEL_BASELINES.get(model, {})
 
         blocks_total = int(m.get("blocks", 0) or 0)
-        start_blocks = int(wsc.get(name, 0) or 0)
+        start_blocks = int(wsc.get(ip, 0) or 0) if ip else 0
         blocks_week = max(0, blocks_total - start_blocks)
 
-        weekly_best_raw = diff_to_number(m.get("session_best"))  # raw from miner for that past week
+        weekly_best_raw = diff_to_number(m.get("weekly_best"))
         weekly_best_raw = float(weekly_best_raw) if weekly_best_raw is not None else 0.0
 
         hr = m.get("hashrate_ths")
@@ -800,7 +892,6 @@ def compute_motw_for_last_week(snapshot_miners):
             "uptime_frac": uptime_frac,
         })
 
-    # Weights
     W_BLOCKS = 0.40
     W_DIFF   = 0.25
     W_HR     = 0.15
@@ -849,11 +940,12 @@ def compute_motw_for_last_week(snapshot_miners):
     shpct_str = f"{int(round(shpct))}%" if shpct is not None else "—"
     up_str = f"{int(round(best_row['uptime_frac'] * 100.0))}%"
 
+    name_html = f'<span class="motwName">{best_name}</span>'
     summary = (
-        f"🏆 Miner of the Week — {best_name} — Score {score_int} — "
+        f"🏆 Miner of the Week - {name_html} - Score {score_int} - "
         f"Blocks {best_row['blocks_week']} | "
-        f"Best {fmt_diff_si_adaptive(best_row['weekly_best'])} | "
-        f"HR {hrpct_str} | Shares/hr {shpct_str} | Uptime {up_str}"
+        f"Best Difficulty {fmt_diff_si_adaptive(best_row['weekly_best'])} | "
+        f"Hashrate {hrpct_str} | Shares per Hour {shpct_str} | Uptime {up_str} 🏆"
     )
 
     return best_name, score_int, summary
@@ -872,11 +964,10 @@ def weekly_rollover_loop():
             if last_run_week != (iso_year, iso_week):
                 snapshot = list(miners_state.values())
 
-                # Weekly best diff (for previous week banner)
                 best_val = None
                 best_name = None
                 for m in snapshot:
-                    val = diff_to_number(m.get("session_best"))
+                    val = diff_to_number(m.get("weekly_best"))
                     if val is None:
                         continue
                     if best_val is None or val > best_val:
@@ -892,7 +983,6 @@ def weekly_rollover_loop():
                         }
                         _save_weekly_best()
 
-                # Miner of the Week
                 winner, score_int, summary = compute_motw_for_last_week(snapshot)
                 if winner and summary:
                     with _motw_lock:
@@ -904,7 +994,6 @@ def weekly_rollover_loop():
                         }
                         _save_motw()
 
-                # Reset weekly baseline counts + weekly best diffs
                 with _blocks_lock:
                     week_start_unix = int(time.time())
                     week_start_counts = dict(block_counts)
@@ -913,7 +1002,6 @@ def weekly_rollover_loop():
                     weekly_current = {}
                     _save_weekly_current()
 
-                # Restart miners
                 for _, cfg in MINERS.items():
                     ip = cfg["ip"]
                     try:
@@ -924,6 +1012,30 @@ def weekly_rollover_loop():
                 last_run_week = (iso_year, iso_week)
 
         time.sleep(30)
+
+
+def normalize_motw_string(name, raw_str):
+    if not raw_str and not name:
+        return None
+    s = raw_str or ""
+
+    if name and "motwName" not in s:
+        pattern = r"(Miner of the Week\s*-\s*)(.*?)(\s*- Score\b)"
+        def repl(m):
+            inner = m.group(2).strip()
+            return f'{m.group(1)}<span class="motwName">{inner}</span>{m.group(3)}'
+        new_s = re.sub(pattern, repl, s)
+        if new_s == s:
+            if name in s:
+                s = s.replace(name, f'<span class="motwName">{name}</span>', 1)
+        else:
+            s = new_s
+
+    s = s.replace("| Best ", "| Best Difficulty ")
+    s = s.replace("| HR ", "| Hashrate ")
+    s = s.replace("| Shares/h ", "| Shares per Hour ")
+
+    return s or None
 
 
 # =========================
@@ -938,6 +1050,10 @@ def refresh_coin_logos():
         "BCH": "bitcoin-cash",
         "FB":  "fractal-bitcoin",
         "DGB": "digibyte",
+        "CAS": "cashaa",
+        "CHTA": "cheetahcoin",
+        "XMR": "monero",
+        "QUAI": "quai-network",
     }
 
     ids = ",".join(mapping.get(sym) for sym in COIN_ORDER if sym in mapping)
@@ -945,7 +1061,7 @@ def refresh_coin_logos():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
-            params={"vs_currency": "gbp", "ids": ids, "sparkline": "false"},
+            params={"vs_currency": CURRENCY_CODE.lower(), "ids": ids, "sparkline": "false"},
             timeout=10,
         )
         r.raise_for_status()
@@ -965,6 +1081,10 @@ def refresh_coin_logos():
                 cid = mapping.get(sym)
                 if cid and id_to_image.get(cid):
                     coin_logos[sym] = id_to_image[cid]
+
+            coin_logos["CAS"] = "https://cascoin.net/assets/logo.CIwpWNZk_Z1m8T3m.webp"
+            coin_logos["QUAI"] = "https://s2.coinmarketcap.com/static/img/coins/64x64/22354.png"
+
             logos_last_ok_unix = int(time.time())
             logos_last_err = None
     except Exception as e:
@@ -978,31 +1098,59 @@ def _wtm_coin_json(coin_id: int):
     return r.json()
 
 
-def fetch_coin_stats_gbp():
-    out = {sym: {"price_gbp": None, "diff": None} for sym in COIN_ORDER}
+def fetch_quai_sha256_difficulty():
+    try:
+        r = requests.get("https://pool.kryptex.com/quai-sha256/about-coin", timeout=8)
+        r.raise_for_status()
+        txt = r.text
+        m = re.search(r"mining\s+difficulty\s+of\s+([0-9]+(?:\.[0-9]+)?)\s*MH", txt, re.IGNORECASE)
+        if not m:
+            m = re.search(r"difficulty\s+of\s+([0-9]+(?:\.[0-9]+)?)\s*MH", txt, re.IGNORECASE)
+        if not m:
+            return None
+        mh_val = float(m.group(1))
+        return mh_val * 1_000_000.0
+    except Exception:
+        return None
 
-    # Prices (CoinGecko)
+
+def fetch_coin_stats():
+    """
+    Fetch price (in configured fiat) + difficulty for each symbol.
+    Internally: coin_state[sym] = {"price": numeric, "diff": numeric}
+    """
+    out = {sym: {"price": None, "diff": None} for sym in COIN_ORDER}
+
+    cur = CURRENCY_CODE.lower()
+
     try:
         cg_ids = []
         if "BTC" in COIN_ORDER: cg_ids.append("bitcoin")
         if "BCH" in COIN_ORDER: cg_ids.append("bitcoin-cash")
         if "FB"  in COIN_ORDER: cg_ids.append("fractal-bitcoin")
         if "DGB" in COIN_ORDER: cg_ids.append("digibyte")
+        if "CAS" in COIN_ORDER: cg_ids.append("cashaa")
+        if "CHTA" in COIN_ORDER: cg_ids.append("cheetahcoin")
+        if "XMR" in COIN_ORDER: cg_ids.append("monero")
+        if "QUAI" in COIN_ORDER: cg_ids.append("quai-network")
 
         cg = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ",".join(cg_ids), "vs_currencies": "gbp"},
+            params={"ids": ",".join(cg_ids), "vs_currencies": cur},
             timeout=8,
         ).json()
 
-        if "BTC" in COIN_ORDER: out["BTC"]["price_gbp"] = pick_first(cg.get("bitcoin", {}), ["gbp"], None)
-        if "BCH" in COIN_ORDER: out["BCH"]["price_gbp"] = pick_first(cg.get("bitcoin-cash", {}), ["gbp"], None)
-        if "FB"  in COIN_ORDER: out["FB"]["price_gbp"]  = pick_first(cg.get("fractal-bitcoin", {}), ["gbp"], None)
-        if "DGB" in COIN_ORDER: out["DGB"]["price_gbp"] = pick_first(cg.get("digibyte", {}), ["gbp"], None)
+        if "BTC" in COIN_ORDER: out["BTC"]["price"] = pick_first(cg.get("bitcoin", {}), [cur], None)
+        if "BCH" in COIN_ORDER: out["BCH"]["price"] = pick_first(cg.get("bitcoin-cash", {}), [cur], None)
+        if "FB"  in COIN_ORDER: out["FB"]["price"]  = pick_first(cg.get("fractal-bitcoin", {}), [cur], None)
+        if "DGB" in COIN_ORDER: out["DGB"]["price"] = pick_first(cg.get("digibyte", {}), [cur], None)
+        if "CAS" in COIN_ORDER: out["CAS"]["price"] = pick_first(cg.get("cashaa", {}), [cur], None)
+        if "CHTA" in COIN_ORDER: out["CHTA"]["price"] = pick_first(cg.get("cheetahcoin", {}), [cur], None)
+        if "XMR" in COIN_ORDER: out["XMR"]["price"] = pick_first(cg.get("monero", {}), [cur], None)
+        if "QUAI" in COIN_ORDER: out["QUAI"]["price"] = pick_first(cg.get("quai-network", {}), [cur], None)
     except Exception:
         pass
 
-    # Difficulties (WhatToMine)
     try:
         if "BTC" in COIN_ORDER: out["BTC"]["diff"] = pick_first(_wtm_coin_json(1), ["difficulty"], None)
     except Exception:
@@ -1017,6 +1165,38 @@ def fetch_coin_stats_gbp():
         pass
     try:
         if "DGB" in COIN_ORDER: out["DGB"]["diff"] = pick_first(_wtm_coin_json(113), ["difficulty"], None)
+    except Exception:
+        pass
+
+    try:
+        if "CAS" in COIN_ORDER:
+            r = requests.get("https://casplorer.com/api/getdifficulty", timeout=8)
+            r.raise_for_status()
+            txt = r.text.strip()
+            out["CAS"]["diff"] = float(txt)
+    except Exception:
+        pass
+
+    try:
+        if "CHTA" in COIN_ORDER:
+            r = requests.get("http://chtaexplorer.mooo.com:3002/api/getdifficulty", timeout=8)
+            r.raise_for_status()
+            txt = r.text.strip()
+            out["CHTA"]["diff"] = float(txt)
+    except Exception:
+        pass
+
+    try:
+        if "XMR" in COIN_ORDER:
+            out["XMR"]["diff"] = pick_first(_wtm_coin_json(101), ["difficulty"], None)
+    except Exception:
+        pass
+
+    try:
+        if "QUAI" in COIN_ORDER:
+            qd = fetch_quai_sha256_difficulty()
+            if qd is not None:
+                out["QUAI"]["diff"] = qd
     except Exception:
         pass
 
@@ -1047,7 +1227,7 @@ def coin_loop():
             last_logo_refresh = now_unix
 
         try:
-            cs = fetch_coin_stats_gbp()
+            cs = fetch_coin_stats()
             with _coin_lock:
                 coin_state = cs
                 coin_last_ok_unix = int(time.time())
@@ -1057,6 +1237,99 @@ def coin_loop():
                 coin_last_err = str(e)[:200]
 
         time.sleep(max(5, int(COIN_REFRESH_SECONDS)))
+
+
+# =========================
+# STRATUM / MINING INFO HELPERS
+# =========================
+
+def _bool_flag(val):
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val != 0
+    if val is None:
+        return False
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return False
+
+
+def _parse_stratum_host_port(url, port_hint):
+    host = None
+    port = None
+
+    s = None
+    if url is not None:
+        s = str(url).strip()
+    if s:
+        if "://" in s:
+            s = s.split("://", 1)[1]
+        if "/" in s:
+            s = s.split("/", 1)[0]
+        parts = s.split(":")
+        if len(parts) >= 2:
+            host = parts[0].lower()
+            try:
+                port = int(parts[1])
+            except Exception:
+                port = None
+        else:
+            host = s.lower()
+
+    if port is None and port_hint is not None:
+        try:
+            port = int(str(port_hint).strip())
+        except Exception:
+            pass
+
+    return host, port
+
+
+def derive_mining_info(miner):
+    """
+    Generic mining display based on stratum host:port and/or worker name.
+    No pool- or coin-specific assumptions.
+    """
+    model = miner.get("model")
+    url = miner.get("stratum_url")
+    port = miner.get("stratum_port")
+    user = miner.get("stratum_user")
+
+    using_fallback = miner.get("using_fallback")
+    is_using_fallback_stratum = miner.get("is_using_fallback_stratum")
+    fb_url = miner.get("fallback_stratum_url")
+    fb_port = miner.get("fallback_stratum_port")
+
+    # Many firmwares use a fallback pool; keep behaviour but generic
+    if _bool_flag(using_fallback) or _bool_flag(is_using_fallback_stratum):
+        if fb_url:
+            url = fb_url
+        if fb_port:
+            port = fb_port
+
+    host, port_num = _parse_stratum_host_port(url, port)
+
+    label_parts = []
+    if host:
+        label_parts.append(host)
+    if port_num:
+        label_parts.append(str(port_num))
+    label = ":".join(label_parts) if label_parts else None
+
+    text = None
+    if label:
+        text = f"Pool: {label}"
+    elif user:
+        text = f"Worker: {user}"
+    else:
+        text = None
+
+    mining_symbol = None  # public version is coin-agnostic
+    return text, mining_symbol
 
 
 # =========================
@@ -1074,11 +1347,14 @@ def data():
         coins_out = {}
         for sym in COIN_ORDER:
             c = coin_state.get(sym, {})
+            price_raw = c.get("price")
+            diff_raw = c.get("diff")
             coins_out[sym] = {
-                "price_gbp": fmt_gbp(c.get("price_gbp")) if c.get("price_gbp") is not None else "-",
-                "diff": fmt_diff_si(c.get("diff")) if c.get("diff") is not None else "-",
-                "price_gbp_raw": c.get("price_gbp"),
-                "diff_raw": c.get("diff"),
+                # keep names for frontend compatibility; values are generic fiat
+                "price_gbp": fmt_fiat(price_raw) if price_raw is not None else "-",
+                "diff": fmt_diff_si(diff_raw) if diff_raw is not None else "-",
+                "price_gbp_raw": price_raw,
+                "diff_raw": diff_raw,
             }
         coin_ok_unix = coin_last_ok_unix
         coin_err = coin_last_err
@@ -1097,7 +1373,20 @@ def data():
 
     with _motw_lock:
         motw_name = motw.get("prev_name")
-        motw_str = motw.get("prev_str")
+        motw_str_raw = motw.get("prev_str")
+        motw_str = normalize_motw_string(motw_name, motw_str_raw)
+
+    if maintenance_base_unix is not None and MAINTENANCE_CYCLE_DAYS > 0:
+        cycle_sec = MAINTENANCE_CYCLE_DAYS * 24 * 3600
+        now_unix = int(time.time())
+        elapsed = max(0, now_unix - maintenance_base_unix)
+        completed = elapsed // cycle_sec
+        next_cycle_start = maintenance_base_unix + completed * cycle_sec
+        next_maint = next_cycle_start + cycle_sec
+        rem_sec = max(0, next_maint - now_unix)
+        maint_days_left = int(rem_sec // 86400)
+    else:
+        maint_days_left = None
 
     out = {
         "miners": [],
@@ -1119,6 +1408,7 @@ def data():
         "motw_str": motw_str,
         "miner_page_seconds": MINER_PAGE_SECONDS,
         "miners_per_page": MINERS_PER_PAGE,
+        "maintenance_days_left": maint_days_left,
     }
 
     for _, m in miners_state.items():
@@ -1126,6 +1416,73 @@ def data():
         if weekly_raw is None:
             weekly_raw = diff_to_number(m.get("session_best"))
         bo_raw_num = diff_to_number(m.get("best_overall"))
+
+        acc_raw = m.get("shares_accepted")
+        rej_raw = m.get("shares_rejected")
+        rej_pct_val = None
+        try:
+            if acc_raw is not None or rej_raw is not None:
+                a = float(acc_raw or 0)
+                r = float(rej_raw or 0)
+                total = a + r
+                if total > 0:
+                    rej_pct_val = (r / total) * 100.0
+        except Exception:
+            rej_pct_val = None
+
+        if rej_pct_val is not None:
+            rej_pct_str = f"{rej_pct_val:.2f}%"
+        else:
+            rej_pct_str = "-"
+
+        ths_val = None
+        try:
+            ths_val = float(m.get("hashrate_ths")) if m.get("hashrate_ths") is not None else None
+        except Exception:
+            ths_val = None
+
+        raw_power = m.get("power_raw")
+        power_w = None
+        try:
+            if isinstance(raw_power, (list, tuple)):
+                vals = [float(x) for x in raw_power if x is not None]
+                if vals:
+                    power_w = sum(vals)
+            elif raw_power is not None:
+                power_w = float(raw_power)
+        except Exception:
+            power_w = None
+
+        if power_w is None:
+            v = m.get("voltage")
+            a = m.get("currentA")
+            try:
+                if v is not None and a is not None:
+                    v_f = float(v)
+                    a_f = float(a)
+                    if v_f > 0 and a_f > 0:
+                        power_w = v_f * a_f
+            except Exception:
+                power_w = None
+
+        eff_jth = None
+        try:
+            if power_w is not None and ths_val is not None and ths_val > 0:
+                eff_jth = power_w / ths_val
+        except Exception:
+            eff_jth = None
+
+        if power_w is not None:
+            power_display = f"{int(round(power_w))} W"
+        else:
+            power_display = "-"
+
+        if eff_jth is not None:
+            eff_display = f"{eff_jth:.1f} J/Th"
+        else:
+            eff_display = "-"
+
+        mining_text, mining_symbol = derive_mining_info(m)
 
         out["miners"].append(
             {
@@ -1135,6 +1492,7 @@ def data():
                 "online": m["online"],
                 "uptime_seconds": m.get("uptime_seconds"),
                 "hashrate": fmt_hashrate_ths(m.get("hashrate_ths")) if m.get("hashrate_ths") is not None else "-",
+                "hashrate_ths_raw": m.get("hashrate_ths"),
                 "temp": fmt_temp_pair(m.get("asic_temp"), m.get("vr_temp")),
                 "asic_temp_raw": m.get("asic_temp"),
                 "vr_temp_raw": m.get("vr_temp"),
@@ -1143,12 +1501,20 @@ def data():
                 "shares_accepted_raw": m.get("shares_accepted"),
                 "shares_rejected": fmt_int_short(m.get("shares_rejected")) if m.get("shares_rejected") is not None else "0",
                 "shares_rejected_raw": m.get("shares_rejected"),
+                "shares_rejected_pct": rej_pct_str,
+                "shares_rejected_pct_raw": rej_pct_val,
                 "session_best": fmt_diff_si_adaptive(weekly_raw) if weekly_raw is not None else "-",
                 "session_best_raw": weekly_raw,
                 "best_overall": fmt_diff_si_adaptive(m.get("best_overall")) if m.get("best_overall") is not None else "-",
                 "best_overall_raw": bo_raw_num,
                 "blocks": int(m.get("blocks", 0)),
                 "last_seen_unix": m.get("last_seen_unix"),
+                "power_watts": power_w,
+                "power_display": power_display,
+                "efficiency_jth": eff_jth,
+                "efficiency_display": eff_display,
+                "mining_display": mining_text,
+                "mining_symbol": mining_symbol,
             }
         )
 
@@ -1165,7 +1531,7 @@ def root():
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Mining Stats Dashboard</title>
 <style>
 :root {
@@ -1181,16 +1547,21 @@ def root():
 }
 
 html, body {
-  height: 100%;
+  min-height: 100dvh;
   margin: 0;
   background: radial-gradient(1200px 600px at 20% 0%, #121a33, var(--bg));
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   color: var(--text);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
 }
 
-.wrap { padding: 10px 12px; }
+.wrap {
+  padding: calc(10px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+           calc(10px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+}
 
 .top {
   display: flex;
@@ -1220,6 +1591,11 @@ html, body {
   color: rgba(120,255,220,0.95);
   font-size: 15px;
   margin-top: 3px;
+}
+
+/* date/time next to LIVE normal white */
+#liveTime {
+  color: var(--text);
 }
 
 .dot {
@@ -1252,7 +1628,7 @@ html, body {
   gap: 22px;
   padding: 5px 10px;
   will-change: transform;
-  animation: tickerMove 22s linear infinite;
+  animation: tickerMove 32s linear infinite;
 }
 
 @keyframes tickerMove {
@@ -1364,7 +1740,6 @@ html, body {
   min-width: 0;
 }
 
-/* Miner of the Week highlight */
 .motwName {
   color: var(--gold);
   animation: goldGlow 1.35s ease-in-out infinite;
@@ -1388,6 +1763,13 @@ html, body {
   align-items: center;
   gap: 8px;
   width: 100%;
+}
+
+.miningWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .statusDot { width: 8px; height: 8px; border-radius: 999px; }
@@ -1482,6 +1864,17 @@ html, body {
   gap: 10px;
   user-select: none;
 }
+
+@media (max-width: 520px) {
+  .title { font-size: 22px; }
+  .live { font-size: 13px; }
+  .updated { font-size: 11px; }
+  .miners { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .valueBig { font-size: 16px; }
+  .minerName { font-size: 17px; }
+  .tickerItem { font-size: 12px; }
+  .card { min-height: 54px; padding: 9px 9px; }
+}
 </style>
 </head>
 <body>
@@ -1491,7 +1884,7 @@ html, body {
       <div class="title">Mining <span class="titleStats">Stats</span> Dashboard</div>
       <div class="updated" id="updated">Dash Updated: - • Coins Updated: - • Time Since Last Block: -</div>
     </div>
-    <div class="live"><span class="dot"></span> LIVE</div>
+    <div class="live"><span class="dot"></span> LIVE <span id="liveTime">--</span></div>
   </div>
 
   <div class="tickerWrap">
@@ -1533,11 +1926,14 @@ let BEST_WEEK_STR = null;
 let MOTW_NAME = null;
 let MOTW_STR = null;
 let TICKER_STATS = null;
+let MAINT_DAYS_LEFT = null;
 
-// Paging state
-let currentPage = 0;
-let pageMiners = [];
+let globalSorted = [];
+let rotateOffset = 0;
 let lastSortedFingerprint = null;
+
+// Track when dash data last arrived
+let DASH_LAST_OK_UNIX = null;
 
 function showBlockPopup(minerName) {
   const el = document.getElementById('blockPopup');
@@ -1668,73 +2064,6 @@ function rankIconForIndex(idx) {
   return "👷";
 }
 
-function sharesRejectedText(m) {
-  const rejStr = m.shares_rejected || '0';
-
-  const accRaw = Number(m.shares_accepted_raw);
-  const rejRaw = Number(m.shares_rejected_raw);
-  let pctStr = '-';
-
-  if (Number.isFinite(accRaw) && Number.isFinite(rejRaw)) {
-    const total = accRaw + rejRaw;
-    if (total > 0) {
-      const pct = (rejRaw / total) * 100;
-      if (pct < 10) {
-        pctStr = pct.toFixed(2) + '%';
-      } else {
-        pctStr = pct.toFixed(1) + '%';
-      }
-    }
-  }
-
-  return rejStr + ' / ' + pctStr;
-}
-
-function minerRowHTML(m, globalIdx, topWeeklyName, topBestName, isSliding, blockLeaderName) {
-  const isTopWeekly = (m.name === topWeeklyName);
-  const isTopBest = (m.name === topBestName);
-
-  const icon = rankIconForIndex(globalIdx);
-  const isBlockLeader = (m.name === blockLeaderName);
-  const blockIcon = isBlockLeader ? '🟨' : '🧱';
-  const blocksStr = padBlocks(m.blocks);
-
-  const st = staleStatus(m);
-  const uptimeText = m.online ? uptimeDaysHoursText(m.uptime_seconds) : 'offline';
-  const thirdBit = st.extraText ? st.extraText : uptimeText;
-
-  const cardClass = isSliding ? 'card slideRow' : 'card';
-  const motwClass = (MOTW_NAME && m.name === MOTW_NAME) ? ' motwName' : '';
-
-  let html = '';
-  html += '<div class="row">';
-  html += '<div class="' + cardClass + '">';
-  html += '<div class="label">MINER</div>';
-  html += '<div class="minerLine">';
-  html += '<div class="rankIcon">' + icon + '</div>';
-  html += '<span class="blocks' + (isBlockLeader ? ' blocksLeader' : '') + '">';
-  html += blockIcon + ' ' + blocksStr + '</span>';
-  html += '<div class="minerName' + motwClass + '" title="' + m.name + '">';
-  html += m.name;
-  html += '</div></div>';
-  html += '<div class="sub">';
-  html += '<span>' + m.ip + '</span>';
-  html += '<span class="statusDot ' + st.dotClass + '"></span>';
-  html += '<span>' + thirdBit + '</span>';
-  html += '</div>';
-  html += '</div>';
-
-  html += '<div class="' + cardClass + '"><div class="label">HASHRATE</div><div class="valueBig">' + (m.hashrate || '-') + '</div></div>';
-  html += '<div class="' + cardClass + '"><div class="label">ASIC / VR / FAN</div><div class="valueBig">' + tempHTML(m) + '</div></div>';
-
-  const sharesText = sharesRejectedText(m);
-  html += '<div class="' + cardClass + '"><div class="label">SHARES REJECTED</div><div class="valueBig">' + sharesText + '</div></div>';
-
-  html += '<div class="' + cardClass + '"><div class="label">WEEKLY / BEST</div><div class="valueBig">' + sessionBestHTML(m, isTopWeekly, isTopBest) + '</div></div>';
-  html += '</div>';
-  return html;
-}
-
 function coinLogoHTML(sym) {
   const primary = LIVE_LOGOS && LIVE_LOGOS[sym] ? LIVE_LOGOS[sym] : '';
   const fallbackList = (FALLBACK_LOGO[sym] || []);
@@ -1760,9 +2089,9 @@ function coinLogoHTML(sym) {
   '>';
 }
 
+// Weekly best ticker disabled (MOTW already covers it)
 function weeklyBestTickerHTML() {
-  if (!BEST_WEEK_NAME || !BEST_WEEK_STR) return null;
-  return '⛏️ Best Difficulty for Previous Week - ' + BEST_WEEK_STR + ' by ' + BEST_WEEK_NAME + ' ⛏️';
+  return null;
 }
 
 function motwTickerHTML() {
@@ -1780,6 +2109,7 @@ function computeTickerStats(miners) {
   let maxTemp = null;
   let totalBlocks = 0;
   let blocksSeen = false;
+  let powerSum = 0, powerCount = 0;
 
   for (const m of miners) {
     if (m.online) activeMiners++;
@@ -1799,15 +2129,30 @@ function computeTickerStats(miners) {
 
     const b = Number(m.blocks);
     if (Number.isFinite(b) && b >= 0) { totalBlocks += b; blocksSeen = true; }
+
+    const pw = Number(m.power_watts);
+    if (Number.isFinite(pw) && pw > 0) {
+      powerSum += pw;
+      powerCount++;
+    }
+  }
+
+  const totalHash = hashCount ? hashSum : null;
+  const totalPower = powerCount ? powerSum : null;
+  let avgEff = null;
+  if (totalPower != null && totalHash != null && Number.isFinite(totalHash) && totalHash > 0) {
+    avgEff = totalPower / totalHash;
   }
 
   TICKER_STATS = {
     activeMiners: activeMiners,
     totalMiners: totalMiners,
-    totalHash: hashCount ? hashSum : null,
+    totalHash: totalHash,
     avgTemp: tempCount ? (tempSum / tempCount) : null,
     maxTemp: maxTemp,
     totalBlocks: blocksSeen ? totalBlocks : null,
+    totalPowerW: totalPower,
+    avgEffJTH: avgEff,
   };
 }
 
@@ -1833,10 +2178,22 @@ function statsTickerItems() {
   if (s.totalHash != null && Number.isFinite(Number(s.totalHash))) {
     items.push({ html: '⚡ Total Hashrate: ' + formatTotalHash(s.totalHash) + ' ⚡', cls: ' tickerWeekly' });
   }
+  if (s.totalPowerW != null && Number.isFinite(Number(s.totalPowerW))) {
+    const p = Math.round(Number(s.totalPowerW));
+    items.push({ html: '🔌 Total Power: ' + p + ' W 🔌', cls: ' tickerWeekly' });
+  }
+  if (s.avgEffJTH != null && Number.isFinite(Number(s.avgEffJTH))) {
+    const e = Number(s.avgEffJTH);
+    const val = (e >= 100 ? e.toFixed(0) : e.toFixed(1));
+    items.push({ html: '📈 Avg Efficiency: ' + val + ' J/Th 📈', cls: ' tickerWeekly' });
+  }
   if (s.avgTemp != null && Number.isFinite(Number(s.avgTemp))) {
     const avg = Math.round(Number(s.avgTemp));
     const max = (s.maxTemp != null && Number.isFinite(Number(s.maxTemp))) ? Math.round(Number(s.maxTemp)) : avg;
     items.push({ html: '🌡 Temperatures - Avg ' + avg + ' / Max ' + max + ' 🌡', cls: ' tickerWeekly' });
+  }
+  if (MAINT_DAYS_LEFT != null && Number.isFinite(Number(MAINT_DAYS_LEFT))) {
+    items.push({ html: '🧰 Maintenance in ' + MAINT_DAYS_LEFT + ' days 🧰', cls: ' tickerWeekly' });
   }
   return items;
 }
@@ -1903,29 +2260,103 @@ function buildSortedFingerprint(sortedMiners) {
   return sortedMiners.map(m => (m.name + ':' + (m.blocks||0) + ':' + (m.best_overall_raw||0))).join('|');
 }
 
-function renderPage(sortedMiners, isSliding) {
+function minerRowHTML(m, globalIdx, slide, topWeeklyName, topBestName, blockLeaderName) {
+  const isTopWeekly = (m.name === topWeeklyName);
+  const isTopBest = (m.name === topBestName);
+
+  const icon = rankIconForIndex(globalIdx);
+  const isBlockLeader = (m.name === blockLeaderName);
+  const blockIcon = isBlockLeader ? '🟨' : '🧱';
+  const blocksStr = padBlocks(m.blocks);
+
+  const st = staleStatus(m);
+  const uptimeText = m.online ? uptimeDaysHoursText(m.uptime_seconds) : 'offline';
+  const thirdBit = st.extraText ? st.extraText : uptimeText;
+
+  const cardClass = slide ? 'card slideRow' : 'card';
+  const motwClass = (MOTW_NAME && m.name === MOTW_NAME) ? ' motwName' : '';
+
+  const miningText = m.mining_display || (m.ip || '');
+
+  let html = '';
+  html += '<div class="row">';
+  html += '<div class="' + cardClass + '">';
+  html += '<div class="label">MINER</div>';
+  html += '<div class="minerLine">';
+  html += '<div class="rankIcon">' + icon + '</div>';
+  html += '<span class="blocks' + (isBlockLeader ? ' blocksLeader' : '') + '">';
+  html += blockIcon + ' ' + blocksStr + '</span>';
+  html += '<div class="minerName' + motwClass + '" title="' + m.name + '">';
+  html += m.name;
+  html += '</div></div>';
+  html += '<div class="sub">';
+  html += '<span class="miningWrap"><span>' + miningText + '</span></span>';
+  html += '<span class="statusDot ' + st.dotClass + '"></span>';
+  html += '<span>' + thirdBit + '</span>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="' + cardClass + '"><div class="label">HASHRATE</div><div class="valueBig">' + (m.hashrate || '-') + '</div></div>';
+  html += '<div class="' + cardClass + '"><div class="label">ASIC / VR / FAN</div><div class="valueBig">' + tempHTML(m) + '</div></div>';
+
+  const sharesText = (m.shares_rejected_pct || '-');
+  html += '<div class="' + cardClass + '"><div class="label">REJECT %</div><div class="valueBig">' + sharesText + '</div></div>';
+
+  html += '<div class="' + cardClass + '"><div class="label">WEEKLY / BEST</div><div class="valueBig">' + sessionBestHTML(m, isTopWeekly, isTopBest) + '</div></div>';
+  html += '</div>';
+  return html;
+}
+
+// Dynamic visible rows based on screen width
+function getVisibleRows() {
+  const w = window.innerWidth || document.documentElement.clientWidth || 0;
+  if (w >= 1600) return 5;
+  if (w >= 1200) return 4;
+  if (w >= 800)  return 3;
+  return 2;
+}
+
+function renderAllMiners(slideRotatingRow) {
   const container = document.getElementById('miners');
   const footer = document.getElementById('footerLine');
   if (!container) return;
 
-  const total = sortedMiners.length;
+  const sorted = globalSorted;
+  const total = sorted.length;
   if (!total) {
     container.innerHTML = '';
     if (footer) footer.textContent = '';
     return;
   }
 
-  const pages = Math.max(1, Math.ceil(total / MINERS_PER_PAGE));
-  currentPage = ((currentPage % pages) + pages) % pages;
+  const visibleCount = Math.max(1, getVisibleRows());
+  const display = [];
+  let rotatingRowIndex = null;
 
-  const start = currentPage * MINERS_PER_PAGE;
-  const end = Math.min(total, start + MINERS_PER_PAGE);
-  const slice = sortedMiners.slice(start, end);
+  if (total <= visibleCount) {
+    for (let i = 0; i < total; i++) display.push(sorted[i]);
+  } else {
+    const fixedCount = Math.max(1, visibleCount - 1);
+    const fixedToShow = Math.min(fixedCount, total);
+    for (let i = 0; i < fixedToShow; i++) {
+      display.push(sorted[i]);
+    }
+    const rotPool = sorted.slice(fixedToShow);
+    const len = rotPool.length;
+    if (len === 1) {
+      display.push(rotPool[0]);
+      rotatingRowIndex = display.length - 1;
+    } else if (len > 1) {
+      const idx = ((rotateOffset % len) + len) % len;
+      display.push(rotPool[idx]);
+      rotatingRowIndex = display.length - 1;
+    }
+  }
 
   const topWeeklyName = (function() {
     let bestName = null;
     let bestVal = -Infinity;
-    for (const m of sortedMiners) {
+    for (const m of sorted) {
       const v = Number(m.session_best_raw);
       if (Number.isFinite(v) && v > bestVal) { bestVal = v; bestName = m.name; }
     }
@@ -1935,7 +2366,7 @@ function renderPage(sortedMiners, isSliding) {
   const topBestName = (function() {
     let bestName = null;
     let bestVal = -Infinity;
-    for (const m of sortedMiners) {
+    for (const m of sorted) {
       const v = Number(m.best_overall_raw);
       if (Number.isFinite(v) && v > bestVal) { bestVal = v; bestName = m.name; }
     }
@@ -1944,26 +2375,32 @@ function renderPage(sortedMiners, isSliding) {
 
   let maxBlocks = -Infinity;
   let maxBlocksName = null;
-  for (const m of sortedMiners) {
+  for (const m of sorted) {
     const b = Number(m.blocks || 0);
     if (Number.isFinite(b) && b > maxBlocks) { maxBlocks = b; maxBlocksName = m.name; }
   }
 
   let html = '';
-  for (let i = 0; i < slice.length; i++) {
-    const m = slice[i];
-    const globalIdx = start + i;
-    html += minerRowHTML(m, globalIdx, topWeeklyName, topBestName, isSliding, maxBlocksName);
+  for (let i = 0; i < display.length; i++) {
+    const m = display[i];
+    const globalIdx = sorted.findIndex(x => x.name === m.name && x.ip === m.ip);
+    const isRotRow = (rotatingRowIndex !== null && i === rotatingRowIndex);
+    const slide = slideRotatingRow && isRotRow;
+    html += minerRowHTML(m, globalIdx < 0 ? 0 : globalIdx, slide, topWeeklyName, topBestName, maxBlocksName);
   }
+
   container.innerHTML = html;
 
   if (footer) {
-    footer.textContent =
-      'Showing miners ' + (start + 1) + '–' + end + ' of ' + total +
-      ' • Rotating every ' + MINER_PAGE_SECONDS + 's';
+    let txt =
+      'Showing top ' + display.length + ' miners (of ' + total + ')';
+    if (rotatingRowIndex !== null) {
+      txt += ' • row ' + (rotatingRowIndex + 1) + ' rotates every ' + MINER_PAGE_SECONDS + 's';
+    }
+    footer.textContent = txt;
   }
 
-  for (const m of sortedMiners) {
+  for (const m of sorted) {
     const name = m.name;
     const currentBlocks = Number(m.blocks || 0);
     if (Object.prototype.hasOwnProperty.call(prevBlocks, name)) {
@@ -1978,18 +2415,25 @@ async function tick() {
   try {
     const d = await fetchData();
 
+    DASH_LAST_OK_UNIX = Math.floor(Date.now() / 1000);
+
     const sinceTxt = sinceLastBlockText(d.last_any_block_ts);
     const coinsAge = secondsAgoText(d.coin_last_ok_unix);
+    const dashAge = secondsAgoText(DASH_LAST_OK_UNIX);
 
     if (d.coin_logos) LIVE_LOGOS = d.coin_logos || LIVE_LOGOS;
 
     MOTW_NAME = d.motw_name || null;
     MOTW_STR = d.motw_str || null;
+    MAINT_DAYS_LEFT = d.maintenance_days_left;
 
-    document.getElementById('updated').textContent =
-      'Dash Updated: ' + (d.updated || '-') +
-      ' • Coins Updated: ' + coinsAge +
-      ' • Time Since Last Block: ' + sinceTxt;
+    const updatedEl = document.getElementById('updated');
+    if (updatedEl) {
+      updatedEl.textContent =
+        'Dash Updated: ' + dashAge +
+        ' • Coins Updated: ' + coinsAge +
+        ' • Time Since Last Block: ' + sinceTxt;
+    }
 
     const miners = (d.miners || []).slice();
 
@@ -2035,20 +2479,48 @@ async function tick() {
     const changed = (fingerprint !== lastSortedFingerprint);
     lastSortedFingerprint = fingerprint;
 
-    renderPage(sorted, changed);
-    pageMiners = sorted;
+    globalSorted = sorted;
+    if (changed) rotateOffset = 0;
+    renderAllMiners(false);
   } catch (e) {}
 }
 
 function rotatePage() {
-  if (!pageMiners || !pageMiners.length) return;
-  currentPage++;
-  renderPage(pageMiners, true);
+  const sorted = globalSorted;
+  if (!sorted || sorted.length === 0) return;
+  const visibleCount = Math.max(1, getVisibleRows());
+  if (sorted.length <= visibleCount) return;
+  const fixedCount = Math.max(1, visibleCount - 1);
+  const rotLen = Math.max(1, sorted.length - fixedCount);
+  rotateOffset = (rotateOffset + 1) % rotLen;
+  renderAllMiners(true);
 }
+
+// LIVE clock (date + time)
+function updateLiveClock() {
+  const liveEl = document.getElementById('liveTime');
+  if (!liveEl) return;
+  const nowLocal = new Date();
+  const pad2 = n => String(n).padStart(2,'0');
+  const dateStr = pad2(nowLocal.getDate()) + '-' +
+                  pad2(nowLocal.getMonth() + 1) + '-' +
+                  nowLocal.getFullYear();
+  const timeStr = pad2(nowLocal.getHours()) + ':' +
+                  pad2(nowLocal.getMinutes()) + ':' +
+                  pad2(nowLocal.getSeconds());
+  liveEl.textContent = dateStr + ' ' + timeStr;
+}
+
+window.addEventListener('resize', function() {
+  renderAllMiners(false);
+});
 
 tick();
 setInterval(tick, REFRESH_MS);
 setInterval(rotatePage, MINER_PAGE_SECONDS * 1000);
+
+updateLiveClock();
+setInterval(updateLiveClock, 1000);
 </script>
 </body>
 </html>"""
@@ -2058,6 +2530,13 @@ setInterval(rotatePage, MINER_PAGE_SECONDS * 1000);
         "BCH": ["https://assets.coingecko.com/coins/images/780/large/bitcoin-cash-circle.png"],
         "FB":  ["https://assets.coingecko.com/coins/images/37001/large/fractal-bitcoin.png"],
         "DGB": ["https://assets.coingecko.com/coins/images/63/large/digibyte.png"],
+        "CAS": ["https://cascoin.net/assets/logo.CIwpWNZk_Z1m8T3m.webp"],
+        "CHTA": [],
+        "XMR": ["https://assets.coingecko.com/coins/images/69/large/monero_logo.png"],
+        "QUAI": [
+            "https://s2.coinmarketcap.com/static/img/coins/64x64/22354.png",
+            "https://assets.coingecko.com/coins/images/27928/standard/QuaiLogoFinal.png?1696526947"
+        ],
     }
 
     html = (
@@ -2083,9 +2562,9 @@ if __name__ == "__main__":
     _load_blocks()
     _load_weekly_best()
     _load_motw()
+    _load_maintenance()
     _load_weekly_current()
 
-    # Make sure weekly baseline is initialised safely
     with _blocks_lock:
         if week_start_unix is None:
             week_start_unix = int(time.time())
@@ -2097,5 +2576,4 @@ if __name__ == "__main__":
     threading.Thread(target=coin_loop, daemon=True).start()
     threading.Thread(target=weekly_rollover_loop, daemon=True).start()
 
-    # 👇 Keep this exactly like this (matches your service config)
-    app.run(host="0.0.0.0", port=8788)
+    app.run(host=HOST, port=PORT)
