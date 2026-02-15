@@ -22,3 +22,4 @@
   - Responsive layout with rotating last row for large rigs.
   - “Block found” full-screen popup when any miner’s block count increases.
   - Displays correclty on PC/Laptop Browsers to show more Miners
+
