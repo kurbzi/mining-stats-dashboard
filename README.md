@@ -1,169 +1,91 @@
-# Mining Stats Dashboard (v1.0.2)
+# Mining Stats Dashboard (Public v1.0.3)
 
 ![Mining Stats Dashboard](dashboard.jpg)
 
 ![Block Found Screen](blockfound.jpg)
 
-A lightweight, self-hosted mining dashboard for NerdQAxe and BitAxe Gamma miners.
+A lightweight, self-hosted dashboard for NerdQAxe (NerdOS) and BitAxe Gamma (AxeOS) miners.
 
-This project polls miner APIs on your local network, tracks hashrate, temperatures,
-shares, blocks found, weekly performance, and displays everything in a clean,
-single-page web dashboard with a scrolling coin & stats ticker.
+It polls your miners over your local network (LAN), tracks performance stats (hashrate, temps, shares, uptime, blocks), keeps weekly records, and serves a clean single-page web UI with a scrolling coin + stats ticker.
 
-Designed to be:
+Design goals:
 
-- Easy to deploy  
-- Hard to break  
-- Safe by default  
-- Fully local (LAN-first)
+✅ Easy to deploy
+
+✅ Hard to break
+
+✅ Safe by default
+
+✅ LAN-first (no cloud, no accounts)
 
 ---
 
 ## ⚠️ Disclaimer
 
-This software is provided **as-is**, without warranty of any kind.
+This software is provided as-is, without warranty of any kind.
 
-You use this software **entirely at your own risk**.  
-The author is **not responsible** for:
+You use this software entirely at your own risk. The author is not responsible for:
 
-- Hardware damage  
-- Misconfiguration  
-- Lost profits or rewards  
-- Downtime  
-- Data loss  
-- Incorrect statistics  
-- Financial decisions made based on this dashboard  
+- Hardware damage
+- Misconfiguration
+- Lost profits / rewards
+- Downtime
+- Data loss
+- Incorrect statistics
+- Financial decisions made using this dashboard
 
-This dashboard is for **informational purposes only** and does **not** constitute
-financial or investment advice.
+This dashboard is for informational purposes only and does not constitute financial or investment advice.
 
-**Do not expose this service directly to the public internet** unless you fully
-understand and accept the security implications.
+Do not expose this service to the public internet unless you fully understand the security implications.
 
 ---
 
-## ✨ Features
+## ✨ Features (Public v1.0.3)
+Miner monitoring
+- Live miner monitoring on your LAN
+- Hashrate (TH/s), uptime, temps (ASIC/VR), fan %, shares accepted/rejected
+- Stale/offline detection with configurable thresholds
+- Optional temperature unit display (C/F)
+- Power + efficiency support (when miner API provides it)
 
-- Live miner monitoring (LAN)  
-- Hashrate, temperature, shares, uptime tracking  
-- Block found detection (including BitAxe Gamma `blockFound` API)  
-- Persistent block counts across restarts  
-- Weekly best difficulty tracking  
-- Miner of the Week scoring and highlight  
-- Coin price + difficulty ticker (BTC / BCH / FB / DGB)  
-- Ticker also shows total hashrate, temps, miner counts & total blocks  
-- Block popup overlay when a miner finds a block  
-- Auto Sunday-night weekly rollover (resets weekly stats, computes winners, restarts miners)  
-- Discord webhook notifications for block found events  
-- Fully self-contained single Python file (`ticker.py`)  
-- No database required  
+Blocks + weekly stats
+- Block-found detection using miner-reported counters (blockFound / blocksFound / similar)
+- Persistent block counts across restarts (JSON persistence)
+- Weekly best difficulty tracking (reset-safe)
+- “Miner of the Week” scoring + highlight in ticker
+- Auto weekly rollover (Sunday night): saves results, resets weekly stats, and optionally restarts miners
 
----
+Ticker + UI
+- Coin ticker with price + difficulty + direction indicators
+- Extra ticker items for total hashrate, temps, active miners, total blocks
+- Maintenance countdown ticker item (MAINTENANCE_CYCLE_DAYS)
+- Coin logos (CoinGecko) with fallbacks
+- Block-found popup overlay
+- Clean single-file web UI served directly from the Python script
 
-## 🆕 Changes in v1.0.1 (compared to the original V1)
-
-**Stats & logic**
-
-- Added **reset-safe weekly best difficulty** tracking:
-  - Weekly best per miner is stored separately from the miner’s own session counter.
-  - Survives miner restarts and counter resets.
-- Implemented **Miner of the Week (MOTW)**:
-  - Score based on blocks, difficulty, hashrate vs baseline, shares/hr vs baseline, and uptime.
-  - Winner & summary persisted and shown in the ticker.
-- Added **weekly rollover logic** (Sunday 23:59 server time):
-  - Computes previous week’s *best difficulty* and *Miner of the Week*.
-  - Saves results to JSON.
-  - Resets weekly baselines and weekly bests.
-  - Attempts to restart all configured miners via their `/api/system/restart` endpoint.
-- Improved **block tracking**:
-  - Uses miner-reported `blockFound`/`blocksFound` (or similar) as a reset-safe counter.
-  - Handles decreases as resets instead of losing the total.
-  - Persists counts and timestamps to `blocks.json`.
-
-**UI & layout**
-
-- Miner list now:
-  - Sorts primarily by **blocks**, then **best overall diff**, then name.
-  - Highlights the **block leader** with a different block icon and gold text.
-  - Shows **Miner of the Week** with a glowing gold name.
-  - Uses **paging** with `MINERS_PER_PAGE` and `MINER_PAGE_SECONDS` rotation.
-- “Weekly / Best” column:
-  - Weekly best difficulty is **highlighted** for the current top miner.
-  - Best overall difficulty is **highlighted** for the global top miner.
-- **Block popup overlay**:
-  - When a miner’s block count increases, a full-screen popup appears with the miner name and celebration emojis.
-- **ASIC / VR / FAN** row:
-  - ASIC and VR temps still colour-coded (green/orange/red based on thresholds).
-  - **Fan speed is now rendered in plain white text** for easier reading.
-
-**Shares section**
-
-- Reworked the shares panel:
-  - Card label changed to: **`SHARES REJECTED`**.
-  - Content now shows:  
-    `rejected_count / rejected_percentage`
-  - `rejected_percentage` is computed from raw `accepted` + `rejected` shares:
-    - `rejected % = rejected / (accepted + rejected) * 100`
-    - 2 decimal places under 10%, 1 decimal place otherwise.
-  - If data is missing or invalid, it falls back to `- / -`.
-
-**Ticker upgrades**
-
-- Ticker shows for each coin:
-  - Price in GBP and its direction indicator (up / down / flat).
-  - Difficulty and its direction indicator.
-  - Coin logos via CoinGecko, with fallback URLs.
-- Extra ticker items:
-  - **Miner of the Week** summary line.
-  - **Previous week best difficulty** summary line.
-  - Global stats:
-    - Total blocks found  
-    - Active miners vs total miners  
-    - Total hashrate (TH/s)  
-    - Average and max temperatures across all miners  
-
-**File / script changes**
-
-- Main script is now **`ticker.py`**, not `MSD.py`.  
-- Uses JSON files in the same directory for persistence:
-  - `blocks.json` / `blocks.json.bak`  
-  - `weekly_best.json` / `weekly_best.json.bak`  
-  - `weekly_current.json` / `weekly_current.json.bak`  
-  - `miner_of_week.json` / `miner_of_week.json.bak`  
-
-## What’s new in v1.0.2
-
-- Configurable fiat currency (code + symbol) for all coin prices.
-- Configurable temperature thresholds for the colour indicators.
-- Cleaner, generic “Pool: host:port” mining display (not tied to any specific coin).
-- New ticker items for total hashrate, total estimated power, efficiency and temperatures.
-- Maintenance countdown in the ticker based on `MAINTENANCE_CYCLE_DAYS`.
-- Miner of the Week summary line, calculated from blocks, difficulty, hashrate, shares and uptime.
-- Block-found popup overlay when any miner’s block count increases.
-- Displays correctly on PC/Laptop Browsers to show more Miners
-
-
----
+Alerts
+- Discord webhook notifications for block found events---
 
 ## 🧱 Supported Miners
 
 Tested with:
+- NerdQAxe (NerdOS)
+- BitAxe Gamma (AxeOS)
 
-- NerdQAxe (NerdOS)  
-- BitAxe Gamma (AxeOS)  
+Other miners may work if they expose similar fields via:
+- http://<miner-ip>/api/system/info
 
-Other miners may work if they expose similar `/api/system/info` JSON fields, including:
-
-- Hashrate  
-- Temps  
-- Shares accepted / rejected  
-- Optional block counter (`blockFound`, `blocksFound`, `blocks`, etc.)
+Helpful fields include:
+- Hashrate
+- Temps
+- Shares accepted/rejected
+- Optional block counter (blockFound, blocksFound, blocks, etc.)
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install dependencies
+1. Install dependencies
 
 From the project directory:
 
@@ -174,12 +96,19 @@ python3 -m pip install -r requirements.txt
 
 ## Configuration
 
-Edit the **CONFIG SECTION** at the top of `MSD.py`:
+Open MSD.py and edit the CONFIG SECTION at the top.
+Everything is safe-by-default: leaving values blank disables optional features.
+
+Example config:
 
 ```python
+# Web server
+HOST = "0.0.0.0"
+PORT = 8788
+
 # Polling
-REFRESH_SECONDS = 5            # How often to poll miners
-COIN_REFRESH_SECONDS = 30      # How often to refresh prices/difficulty
+REFRESH_SECONDS = 5
+COIN_REFRESH_SECONDS = 30
 
 # Stale data thresholds
 STALE_YELLOW_SECONDS = 20
@@ -188,27 +117,115 @@ STALE_RED_SECONDS = 60
 # Temperature thresholds (colour changes)
 TEMP_ORANGE_AT = 67
 TEMP_RED_AT = 70
+TEMP_UNIT = "C"  # or "F"
 
 # Currency
-CURRENCY_CODE = "GBP"          # e.g. "GBP", "USD", "EUR"
-CURRENCY_SYMBOL = "£"          # e.g. "£", "$", "€"
+FIAT_CURRENCY = "GBP"
+FIAT_SYMBOL = "£"
 
-# Maintenance countdown (for ticker text only)
-MAINTENANCE_CYCLE_DAYS = 56    # e.g. 8-week cycle
+# Maintenance countdown (optional)
+MAINTENANCE_CYCLE_DAYS = 56  # 8-week cycle
 
-# Miner definitions
+# Discord webhook (optional)
+DISCORD_WEBHOOK_URL = ""  # leave blank to disable
+
+# Miners (optional — dashboard still runs if empty)
 MINERS = {
-    "Miner1": {"ip": "192.168.0.130", "label": "Miner1", "model": "Nerd"},
-    "Miner2": {"ip": "192.168.0.126", "label": "Miner2", "model": "Nerd"},
-    "Miner3": {"ip": "192.168.0.106", "label": "Miner3", "model": "Nerd"},
-    "Miner4": {"ip": "192.168.0.191", "label": "Miner4", "model": "Gamma"},
+    "Miner1": {"ip": "192.168.0.130", "label": "Nerd1",  "model": "Nerd"},
+    "Miner2": {"ip": "192.168.0.191", "label": "Gamma1", "model": "Gamma"},
 }
+Tips:
+- label is just what you want displayed (optional).
+- model is used for baseline comparisons (e.g. MOTW scoring). Unknown models still work.
+
+---
+
+## ⚙️ Configuration guide (Public v1.0.3)
+Polling intervals
+- REFRESH_SECONDS — how often miner stats are polled
+- COIN_REFRESH_SECONDS — how often coin price/difficulty refreshes
+
+Stale thresholds
+- STALE_YELLOW_SECONDS — miner considered “stale” (yellow) after this many seconds
+- STALE_RED_SECONDS — miner considered “stale” (red) after this many seconds
+
+Temperature display
+- TEMP_ORANGE_AT, TEMP_RED_AT — colour thresholds
+- TEMP_UNIT — "C" or "F"
+
+Currency
+- FIAT_CURRENCY — "GBP", "USD", "EUR", etc
+- FIAT_SYMBOL — £, $, €, etc
+
+Maintenance countdown
+- MAINTENANCE_CYCLE_DAYS — used only for a ticker reminder like “Maintenance in X days”
+
+Miners list
+
+Add your miners in:
+```bash
+MINERS = {
+  "Miner1": {"ip": "192.168.0.130", "label": "Miner1", "model": "Nerd"},
+  "Miner2": {"ip": "192.168.0.191", "label": "Miner2", "model": "Gamma"},
+}
+``` 
+- ip is required
+- label is optional (falls back to hostname or the dictionary key)
+- model should match your baseline config keys (e.g. "Nerd", "Gamma")
+
+
+
+Baselines (optional)
+
+Used for “Miner of the Week” scoring:
+```bash
+MODEL_BASELINES = {
+  "Nerd":  {"baseline_ths": 5.50, "baseline_shares_per_hour": 40.0},
+  "Gamma": {"baseline_ths": 1.25, "baseline_shares_per_hour": 10.0},
+}
+``` 
+If you don’t care about MOTW accuracy, you can leave these as defaults.
+
+⛏️ Mining display: custom “Mining DGB / XEC / QUAI / anything”
+
+The dashboard tries to infer what a miner is mining from its stratum host/port/user.
+Since pool formats vary wildly, Public v1.0.3 includes an optional rule system so you can force the mining label reliably.
+
+✅ Custom mining rules (recommended for “Mining DGB” setups)
+
+In the CONFIG SECTION, add:
+```bash
+CUSTOM_MINING_RULES = [
+  {"host_contains": "solo.solohash.co.uk", "port": None, "coin": "DGB"},
+  {"host_contains": "mining.example.com",  "port": 5555, "coin": "XEC"},
+  {"host_contains": "mining.example.com",  "port": 6666, "coin": "DGB"},
+]
+``` 
+How it works:
+
+- host_contains → matches if the stratum host contains this text (case-insensitive)
+- port → optional
+- number (e.g. 3333) matches only that port
+
+None matches any port
+- coin → what to display (e.g. "DGB")
+
+✅ If a rule matches, the miner shows: Mining DGB (and the logo if available).
+✅ If nothing matches (or the miner doesn’t report stratum info), it falls back to showing the miner IP so the UI is always readable.
+
+⚠️ Important note about “universal” pool endpoints (multi-coin)
+
+Some pools use the same host + port for multiple coins, and the coin is chosen by worker settings or server-side routing.
+In that situation, the dashboard cannot automatically know which coin is being mined because the endpoint doesn’t uniquely identify it.
+
+✅ Fix: use CUSTOM_MINING_RULES (or accept the fallback display).
+❌ Not possible: “automatic detection” when the pool itself doesn’t provide a coin-specific identifier.
 
 3. Run the dashboard
 
 From the project directory:
 ```bash
-python3 ticker.py
+python3 MSD.py
 ```
 
 Then open your browser and go to:
@@ -217,21 +234,47 @@ Then open your browser and go to:
 http://<server-ip>:8788
 ```
 
-Replace <server-ip> with the IP address of the machine running ticker.py.
+Replace <server-ip> with the IP address of the machine running MSD.py.
 For example, if it’s your Pi: http://192.168.0.147:8788
 
-🪨 Troubleshooting: Blocks stuck at 0
+🪨 Troubleshooting: 
+Miners show “offline”
 
-This dashboard increments Blocks when your miner exposes a block counter
-in /api/system/info (often blockFound, blocksFound, or similar).
+Check the miner IP address is correct
 
-On some NerdOS / AxeOS builds, you may need to:
+Make sure the miner API is reachable on your LAN:
 
-Enable “Block Found Alerts” (or similar) in the miner UI
+http://<miner-ip>/api/system/info
 
-Make sure you’re running a firmware that exposes the block counter in the API
+Some networks isolate Wi-Fi clients (AP isolation). Disable that if needed.
 
-If your miner does not expose a block counter, Blocks will remain 0.
+Blocks stay at 0
+
+Blocks only increment if your miner exposes a block counter field in its API output (commonly blockFound, blocksFound, blocks, etc.).
+
+If your miner firmware doesn’t provide that field, the dashboard can’t infer blocks — so it will remain 0.
+
+Coins / logos not updating
+
+Coin price + difficulty data relies on external public endpoints (e.g., CoinGecko / WhatToMine). If those rate-limit or change, the dashboard will keep running but may show - temporarily.
+
+📁 Files created by the dashboard
+
+The dashboard stores small JSON files alongside MSD.py to persist totals and weekly stats:
+
+blocks.json (and .bak)
+
+weekly_best.json (and .bak)
+
+weekly_current.json (and .bak)
+
+miner_of_week.json (and .bak)
+
+maintenance.json (and .bak)
+
+notifications.json (and .bak)
+
+They’re safe to delete if you want a clean reset (you’ll lose history).
 
 💖 Support
 
@@ -239,4 +282,3 @@ This project is free and open source.
 If it’s helped you keep your farm happy, you can optionally send a donation:
 
 BTC: bc1qdtn0pwvr9yl7gyfz9l2w874l3jflcgcqxd2yry
-
