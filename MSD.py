@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# Mining Stats Dashboard — v1.0.2 (public)
+# Mining Stats Dashboard — Public v1.0.3
 # Author: kurbzi
 # License: MIT
 #
@@ -22,21 +22,19 @@ COIN_REFRESH_SECONDS = 30
 STALE_YELLOW_SECONDS = 20
 STALE_RED_SECONDS = 60
 
-# Temperature color thresholds
+# Temperature color thresholds (in °C, miner API reports °C)
 TEMP_ORANGE_AT = 67
 TEMP_RED_AT = 70
 
-# Currency for prices (CoinGecko vs_currency)
-# Examples:
-#   CURRENCY_CODE   CURRENCY_SYMBOL
-#   "GBP"           "£"
-#   "USD"           "$"
-#   "EUR"           "€"
-CURRENCY_CODE = "GBP"
-CURRENCY_SYMBOL = "£"
+# Display temperature unit ("C" or "F")
+TEMP_UNIT = "C"  # keep "C" for default behaviour
+
+# Fiat currency for coin prices
+FIAT_CURRENCY = "GBP"  # e.g. "GBP", "USD", "EUR"
+FIAT_SYMBOL = "£"      # prefix used when formatting prices
 
 # Rotating row interval (seconds)
-# - Top N-1 miners stay fixed
+# - Top (visibleCount-1) miners stay fixed
 # - The last visible row rotates through remaining miners every N seconds
 MINER_PAGE_SECONDS = 10
 
@@ -47,54 +45,66 @@ MINERS_PER_PAGE = 3
 # Example: 56 = 8-week cycle
 MAINTENANCE_CYCLE_DAYS = 56
 
-# ✅ How much uptime must drop to count as a reboot (seconds)
-REBOOT_UPTIME_DROP_SECONDS = 45
-
 # ------------------------------------------------------------
 # MINERS (EDIT THESE)
 # ------------------------------------------------------------
+# Tip: label is what you want to see on the dashboard.
+# model should match a key in MODEL_BASELINES ("Nerd" or "Gamma" by default).
 MINERS = {
-    "Miner1": {
-        "ip": "192.168.0.130",
-        "label": "Miner1",
-        "model": "Nerd",
-    },
-    "Miner2": {
-        "ip": "192.168.0.126",
-        "label": "Miner2",
-        "model": "Nerd",
-    },
-    "Miner3": {
-        "ip": "192.168.0.106",
-        "label": "Miner3",
-        "model": "Nerd",
-    },
-    "Miner4": {
-        "ip": "192.168.0.191",
-        "label": "Miner4",
-        "model": "Gamma",
-    },
+    "Miner1": {"ip": "192.168.0.130", "label": "Miner1", "model": "Nerd"},
+    "Miner2": {"ip": "192.168.0.126", "label": "Miner2", "model": "Nerd"},
+    "Miner3": {"ip": "192.168.0.106", "label": "Miner3", "model": "Nerd"},
+    "Miner4": {"ip": "192.168.0.191", "label": "Miner4", "model": "Gamma"},
 }
 
 # ------------------------------------------------------------
 # BASELINES (EDIT IF YOU WANT)
 # ------------------------------------------------------------
 MODEL_BASELINES = {
-    "Nerd": {"baseline_ths": 5.00, "baseline_shares_per_hour": 40.0},
+    "Nerd":  {"baseline_ths": 5.50, "baseline_shares_per_hour": 40.0},
     "Gamma": {"baseline_ths": 1.25, "baseline_shares_per_hour": 10.0},
 }
 
 # ------------------------------------------------------------
 # DISCORD WEBHOOK (OPTIONAL)
 # ------------------------------------------------------------
-# Put your webhook URL here, or leave blank/placeholder to disable.
-DISCORD_WEBHOOK_URL = "PASTE_DISCORD_WEBHOOK_HERE"
+# Leave blank to disable
+DISCORD_WEBHOOK_URL = ""
 
 # ------------------------------------------------------------
-# COINS (UPDATED)
+# COINS (Ticker Order)
 # ------------------------------------------------------------
-# Ticker order for the top ticker
-COIN_ORDER = ["BTC", "BCH", "FB", "DGB", "CAS", "CHTA", "XMR", "QUAI"]
+COIN_ORDER = ["BTC", "BCH", "FB", "DGB", "XEC", "QUAI", "CAS"]
+
+# ------------------------------------------------------------
+# ✅ CUSTOM MINING DISPLAY RULES (USER-FRIENDLY)
+# ------------------------------------------------------------
+# This controls the "Mining ____" line shown under each miner name.
+#
+# ✅ Fully customisable: users can set HOST + PORT + COIN SYMBOL.
+# ✅ If no rule matches (or stratum data is missing), it will fall back to showing the miner IP.
+#
+# ⚠️ Important Note:
+# Some pools use a "universal" endpoint where the same host:port can mine multiple coins.
+# In that case, auto-detection cannot reliably know which coin is being mined.
+# For those pools you MUST add explicit rules below (or accept it falling back to IP / generic text).
+#
+# Matching rules:
+# - host_contains: substring match against stratum host (case-insensitive)
+# - port: integer port to match (or None to match any port)
+# - coin: the coin symbol to display + to try using its logo (must exist in COIN_ORDER to show logo)
+#
+CUSTOM_MINING_RULES = [
+    # Example: Solo DGB pool (customisable)
+    # {"host_contains": "solo.solohash.co.uk", "port": None, "coin": "DGB"},
+
+    # Example: If your DGB pool uses a specific port:
+    # {"host_contains": "examplepool.com", "port": 3333, "coin": "DGB"},
+
+    # Example: Universal host but separate ports per coin:
+    # {"host_contains": "mining.example.com", "port": 5555, "coin": "XEC"},
+    # {"host_contains": "mining.example.com", "port": 6666, "coin": "DGB"},
+]
 
 # Web server settings
 HOST = "0.0.0.0"
@@ -104,7 +114,7 @@ PORT = 8788
 # DO NOT EDIT BELOW THIS LINE
 # =========================
 
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request
 import time
 import threading
 import requests
@@ -124,6 +134,9 @@ WEEKLY_CURRENT_FILE = os.path.join(BASE_DIR, "weekly_current.json")
 MOTW_FILE = os.path.join(BASE_DIR, "miner_of_week.json")
 MAINT_FILE = os.path.join(BASE_DIR, "maintenance.json")
 
+# notifications persistence (stacked popups + cross-device clearing)
+NOTIFS_FILE = os.path.join(BASE_DIR, "notifications.json")
+
 IP_TO_LABEL = {cfg["ip"]: cfg.get("label", name) for name, cfg in MINERS.items()}
 
 miners_state = {}
@@ -133,16 +146,13 @@ _blocks_lock = threading.Lock()
 block_counts = {}        # keyed by IP
 last_block_ts = {}       # keyed by IP
 last_any_block_ts = None
-
-reported_last = {}  # keyed by IP
+reported_last = {}       # keyed by IP
 
 week_start_counts = {}
 week_start_unix = None
 
 _coin_lock = threading.Lock()
-# Internally we track generic price/diff;
-# we still export price_gbp/price_gbp_raw to the frontend for compatibility.
-coin_state = {sym: {"price": None, "diff": None} for sym in COIN_ORDER}
+coin_state = {sym: {"price_gbp": None, "diff": None} for sym in COIN_ORDER}
 coin_last_ok_unix = None
 coin_last_err = None
 
@@ -166,6 +176,11 @@ motw = {"prev_name": None, "prev_score": None, "prev_str": None, "prev_week_iso"
 
 maintenance_base_unix = None  # anchor for maintenance countdown
 
+# notifications queue (stacked)
+_notif_lock = threading.Lock()
+notifications = []  # list of dicts: {id,type,ts_unix,acked,payload...}
+_notif_seq = 0
+
 
 # =========================
 # HELPERS
@@ -174,10 +189,8 @@ maintenance_base_unix = None  # anchor for maintenance countdown
 def now_iso():
     return datetime.utcnow().strftime("%d-%m-%Y %H:%M:%S")
 
-
 def now_hms():
     return datetime.now().strftime("%H:%M:%S")
-
 
 def fmt_hashrate_ths(ths_value):
     try:
@@ -186,18 +199,24 @@ def fmt_hashrate_ths(ths_value):
         return "-"
     return f"{v:.2f} TH/s"
 
-
 def fmt_temp_pair(asic_temp, vr_temp):
     try:
-        a = int(round(float(asic_temp)))
-        v = int(round(float(vr_temp)))
-        return f"{a}° / {v}°"
+        a = float(asic_temp) if asic_temp is not None else None
+        v = float(vr_temp) if vr_temp is not None else None
     except Exception:
-        return "- / -"
+        a = v = None
 
+    def convert(c):
+        if c is None:
+            return "-"
+        if TEMP_UNIT.upper() == "F":
+            f = c * 9.0 / 5.0 + 32.0
+            return f"{int(round(f))}°"
+        return f"{int(round(c))}°"
+
+    return f"{convert(a)} / {convert(v)}"
 
 _SI_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTP])\s*$", re.IGNORECASE)
-
 
 def diff_to_number(x):
     if x is None:
@@ -223,7 +242,6 @@ def diff_to_number(x):
     suf = m.group(2).upper()
     mult = {"K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15}.get(suf, 1.0)
     return num * mult
-
 
 def fmt_diff_si_adaptive(n):
     v = diff_to_number(n)
@@ -254,7 +272,6 @@ def fmt_diff_si_adaptive(n):
         return with_unit(a / 1e3, "K")
     return f"{sign}{int(round(a))}"
 
-
 def fmt_diff_si(n):
     if n is None:
         return "-"
@@ -278,7 +295,6 @@ def fmt_diff_si(n):
     if v >= 1_000:
         return f"{v/1_000:.2f}K"
     return f"{v:.2f}"
-
 
 def fmt_int_short(n):
     try:
@@ -304,20 +320,16 @@ def fmt_int_short(n):
         s = s.replace(".0", "")
     return sign + s
 
-
 def fmt_fiat(x):
-    """Generic fiat formatter using CURRENCY_SYMBOL."""
     try:
         v = float(x)
     except Exception:
         return "-"
-    sym = CURRENCY_SYMBOL or ""
     if v >= 1:
-        return f"{sym}{v:,.2f}"
+        return f"{FIAT_SYMBOL}{v:,.2f}"
     if v >= 0.01:
-        return f"{sym}{v:,.4f}"
-    return f"{sym}{v:.6f}"
-
+        return f"{FIAT_SYMBOL}{v:,.4f}"
+    return f"{FIAT_SYMBOL}{v:.6f}"
 
 def pick_first(js, keys, default=None):
     for k in keys:
@@ -325,14 +337,12 @@ def pick_first(js, keys, default=None):
             return js.get(k)
     return default
 
-
 def _safe_read_json(path: str):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
-
 
 def _safe_write_json(path: str, obj):
     tmp = path + ".tmp"
@@ -359,6 +369,97 @@ def _safe_write_json(path: str, obj):
             pass
         return False
 
+
+# =========================
+# NOTIFICATIONS (STACKED + CROSS-DEVICE)
+# =========================
+
+def _load_notifications():
+    global notifications
+    data = _safe_read_json(NOTIFS_FILE) or _safe_read_json(NOTIFS_FILE + ".bak")
+    if not isinstance(data, dict):
+        return
+    arr = data.get("notifications")
+    if not isinstance(arr, list):
+        return
+    cleaned = []
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        nid = it.get("id")
+        typ = it.get("type")
+        ts = it.get("ts_unix")
+        ack = it.get("acked", False)
+        if not nid or not typ or not isinstance(ts, (int, float)):
+            continue
+        cleaned.append({
+            "id": str(nid),
+            "type": str(typ),
+            "ts_unix": int(ts),
+            "acked": bool(ack),
+            "payload": it.get("payload") if isinstance(it.get("payload"), dict) else {},
+        })
+    with _notif_lock:
+        notifications = cleaned
+
+def _save_notifications():
+    with _notif_lock:
+        obj = {"notifications": notifications}
+    _safe_write_json(NOTIFS_FILE, obj)
+
+def _notif_new_id(ts_unix: int) -> str:
+    global _notif_seq
+    with _notif_lock:
+        _notif_seq += 1
+        return f"{int(ts_unix)}-{_notif_seq}"
+
+def _notif_cleanup_locked(max_keep: int = 200):
+    global notifications
+    notifications.sort(key=lambda x: int(x.get("ts_unix", 0)))
+    unacked = [n for n in notifications if not n.get("acked", False)]
+    acked = [n for n in notifications if n.get("acked", False)]
+    remain = max(0, max_keep - len(unacked))
+    if remain and len(acked) > remain:
+        acked = acked[-remain:]
+    notifications = acked + unacked
+
+def enqueue_notification(ntype: str, payload: dict, ts_unix: int = None):
+    if ts_unix is None:
+        ts_unix = int(time.time())
+    nid = _notif_new_id(ts_unix)
+    item = {
+        "id": nid,
+        "type": str(ntype),
+        "ts_unix": int(ts_unix),
+        "acked": False,
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+    with _notif_lock:
+        notifications.append(item)
+        _notif_cleanup_locked()
+    _save_notifications()
+    return nid
+
+def ack_notification_ids(ids):
+    if not ids:
+        return 0
+    ids_set = {str(x) for x in ids if x is not None}
+    changed = 0
+    with _notif_lock:
+        for n in notifications:
+            if not n.get("acked", False) and str(n.get("id")) in ids_set:
+                n["acked"] = True
+                changed += 1
+        if changed:
+            _notif_cleanup_locked()
+    if changed:
+        _save_notifications()
+    return changed
+
+
+# =========================
+# BLOCKS LOAD/SAVE
+# =========================
 
 def _load_blocks():
     global block_counts, last_block_ts, last_any_block_ts, reported_last, week_start_counts, week_start_unix
@@ -421,6 +522,7 @@ def _load_blocks():
             week_start_counts = week_start_counts_local
             return True
 
+        # legacy: counts only
         cleaned = {}
         for k, v in data.items():
             try:
@@ -479,7 +581,6 @@ def _load_blocks():
         week_start_unix = int(time.time())
         week_start_counts = {}
 
-
 def _save_blocks():
     obj = {
         "counts": block_counts,
@@ -491,6 +592,10 @@ def _save_blocks():
     }
     _safe_write_json(BLOCKS_FILE, obj)
 
+
+# =========================
+# WEEKLY / MOTW LOAD/SAVE
+# =========================
 
 def _load_weekly_best():
     global weekly_best
@@ -504,10 +609,8 @@ def _load_weekly_best():
         "prev_str": data.get("prev_str"),
     }
 
-
 def _save_weekly_best():
     _safe_write_json(WEEKLY_BEST_FILE, weekly_best)
-
 
 def _load_weekly_current():
     global weekly_current
@@ -537,14 +640,9 @@ def _load_weekly_current():
             continue
     weekly_current = cleaned
 
-
 def _save_weekly_current():
-    obj = {
-        "week_start_unix": week_start_unix,
-        "current": weekly_current,
-    }
+    obj = {"week_start_unix": week_start_unix, "current": weekly_current}
     _safe_write_json(WEEKLY_CURRENT_FILE, obj)
-
 
 def _load_motw():
     global motw
@@ -559,10 +657,8 @@ def _load_motw():
         "prev_week_iso": data.get("prev_week_iso"),
     }
 
-
 def _save_motw():
     _safe_write_json(MOTW_FILE, motw)
-
 
 def _load_maintenance():
     global maintenance_base_unix
@@ -579,9 +675,13 @@ def _load_maintenance():
         _safe_write_json(MAINT_FILE, {"base_unix": maintenance_base_unix})
 
 
+# =========================
+# DISCORD BLOCK ALERT
+# =========================
+
 def send_discord_block_found(miner_name: str, when_hms: str, is_test: bool = False,
-                             share_diff=None, network_diff=None):
-    if not DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL.strip() == "" or "PASTE_DISCORD_WEBHOOK_HERE" in DISCORD_WEBHOOK_URL:
+                            share_diff=None, network_diff=None):
+    if not DISCORD_WEBHOOK_URL or not str(DISCORD_WEBHOOK_URL).strip():
         return
 
     prefix = "🧪 **TEST WEBHOOK**" if is_test else "🧱 **BLOCK FOUND!**"
@@ -648,7 +748,6 @@ def poll_miner_api(ip: str):
         voltage = pick_first(js, ["voltage", "volt", "volts"], None)
         currentA = pick_first(js, ["currentA", "current_a", "current"], None)
 
-        # Generic stratum info
         stratum_url = pick_first(js, ["stratumURL", "stratumUrl", "poolURL", "stratum_url", "pool_url"], None)
         stratum_port = pick_first(js, ["stratumPort", "stratum_port", "poolPort", "pool_port"], None)
         stratum_user = pick_first(js, ["stratumUser", "stratum_user", "worker", "user"], None)
@@ -685,7 +784,6 @@ def poll_miner_api(ip: str):
     except Exception:
         return {"online": False}
 
-
 def miner_loop():
     global miners_state, last_any_block_ts, last_block_popup
     while True:
@@ -693,9 +791,11 @@ def miner_loop():
         now_unix = int(time.time())
 
         for name, cfg in MINERS.items():
-            ip = cfg["ip"]
-            fallback_label = cfg.get("label", name)
+            ip = cfg.get("ip")
+            if not ip:
+                continue
 
+            fallback_label = cfg.get("label", name)
             data = poll_miner_api(ip)
 
             hostname = data.get("hostname")
@@ -750,6 +850,7 @@ def miner_loop():
                             ts_hms = now_hms()
                             for _ in range(delta):
                                 send_discord_block_found(display_name, ts_hms, is_test=False)
+                                enqueue_notification("block", {"miner": display_name}, ts_unix=now_unix)
 
                             last_block_popup = {"miner": display_name, "ts_unix": now_unix, "is_test": False}
 
@@ -780,6 +881,7 @@ def miner_loop():
                 "weekly_best": week_val,
                 "best_overall": data.get("best_overall", None),
                 "uptime_seconds": data.get("uptime_seconds", None),
+                "blocks_found": data.get("blocks_found", None),
                 "blocks": int(block_counts.get(key_ip, 0)),
                 "last_seen_unix": last_seen,
                 "fan_speed": data.get("fan_speed", None),
@@ -810,7 +912,6 @@ def _clamp(x, lo, hi):
         return lo
     return max(lo, min(hi, v))
 
-
 def _ratio_pct(actual, baseline):
     try:
         a = float(actual)
@@ -821,7 +922,6 @@ def _ratio_pct(actual, baseline):
     except Exception:
         return None
 
-
 def _shares_per_hour(shares, uptime_seconds):
     try:
         s = float(shares)
@@ -831,7 +931,6 @@ def _shares_per_hour(shares, uptime_seconds):
         return s / (up / 3600.0)
     except Exception:
         return None
-
 
 def compute_motw_for_last_week(snapshot_miners):
     if not snapshot_miners:
@@ -950,7 +1049,6 @@ def compute_motw_for_last_week(snapshot_miners):
 
     return best_name, score_int, summary
 
-
 def weekly_rollover_loop():
     global weekly_best, motw, week_start_counts, week_start_unix, weekly_current
 
@@ -1003,7 +1101,9 @@ def weekly_rollover_loop():
                     _save_weekly_current()
 
                 for _, cfg in MINERS.items():
-                    ip = cfg["ip"]
+                    ip = cfg.get("ip")
+                    if not ip:
+                        continue
                     try:
                         requests.post(f"http://{ip}/api/system/restart", timeout=2)
                     except Exception:
@@ -1013,7 +1113,6 @@ def weekly_rollover_loop():
 
         time.sleep(30)
 
-
 def normalize_motw_string(name, raw_str):
     if not raw_str and not name:
         return None
@@ -1021,6 +1120,7 @@ def normalize_motw_string(name, raw_str):
 
     if name and "motwName" not in s:
         pattern = r"(Miner of the Week\s*-\s*)(.*?)(\s*- Score\b)"
+
         def repl(m):
             inner = m.group(2).strip()
             return f'{m.group(1)}<span class="motwName">{inner}</span>{m.group(3)}'
@@ -1050,10 +1150,10 @@ def refresh_coin_logos():
         "BCH": "bitcoin-cash",
         "FB":  "fractal-bitcoin",
         "DGB": "digibyte",
-        "CAS": "cashaa",
-        "CHTA": "cheetahcoin",
+        "CAS": "cashaa",          # price only; logo overridden below
         "XMR": "monero",
-        "QUAI": "quai-network",
+        "QUAI": "quai-network",   # logo overridden below
+        "XEC": "ecash",
     }
 
     ids = ",".join(mapping.get(sym) for sym in COIN_ORDER if sym in mapping)
@@ -1061,7 +1161,7 @@ def refresh_coin_logos():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
-            params={"vs_currency": CURRENCY_CODE.lower(), "ids": ids, "sparkline": "false"},
+            params={"vs_currency": (FIAT_CURRENCY or "GBP").lower(), "ids": ids, "sparkline": "false"},
             timeout=10,
         )
         r.raise_for_status()
@@ -1082,6 +1182,7 @@ def refresh_coin_logos():
                 if cid and id_to_image.get(cid):
                     coin_logos[sym] = id_to_image[cid]
 
+            # prefer known-stable logos where community ones can change
             coin_logos["CAS"] = "https://cascoin.net/assets/logo.CIwpWNZk_Z1m8T3m.webp"
             coin_logos["QUAI"] = "https://s2.coinmarketcap.com/static/img/coins/64x64/22354.png"
 
@@ -1091,12 +1192,10 @@ def refresh_coin_logos():
         with _logo_lock:
             logos_last_err = str(e)[:200]
 
-
 def _wtm_coin_json(coin_id: int):
     r = requests.get(f"https://whattomine.com/coins/{coin_id}.json", timeout=8)
     r.raise_for_status()
     return r.json()
-
 
 def fetch_quai_sha256_difficulty():
     try:
@@ -1113,41 +1212,40 @@ def fetch_quai_sha256_difficulty():
     except Exception:
         return None
 
-
-def fetch_coin_stats():
-    """
-    Fetch price (in configured fiat) + difficulty for each symbol.
-    Internally: coin_state[sym] = {"price": numeric, "diff": numeric}
-    """
-    out = {sym: {"price": None, "diff": None} for sym in COIN_ORDER}
-
-    cur = CURRENCY_CODE.lower()
+def fetch_coin_stats_gbp():
+    out = {sym: {"price_gbp": None, "diff": None} for sym in COIN_ORDER}
+    vs_code = (FIAT_CURRENCY or "GBP").lower()
 
     try:
         cg_ids = []
-        if "BTC" in COIN_ORDER: cg_ids.append("bitcoin")
-        if "BCH" in COIN_ORDER: cg_ids.append("bitcoin-cash")
-        if "FB"  in COIN_ORDER: cg_ids.append("fractal-bitcoin")
-        if "DGB" in COIN_ORDER: cg_ids.append("digibyte")
-        if "CAS" in COIN_ORDER: cg_ids.append("cashaa")
-        if "CHTA" in COIN_ORDER: cg_ids.append("cheetahcoin")
-        if "XMR" in COIN_ORDER: cg_ids.append("monero")
+        if "BTC" in COIN_ORDER:  cg_ids.append("bitcoin")
+        if "BCH" in COIN_ORDER:  cg_ids.append("bitcoin-cash")
+        if "FB" in COIN_ORDER:   cg_ids.append("fractal-bitcoin")
+        if "DGB" in COIN_ORDER:  cg_ids.append("digibyte")
+        if "CAS" in COIN_ORDER:  cg_ids.append("cashaa")
+        if "XMR" in COIN_ORDER:  cg_ids.append("monero")
         if "QUAI" in COIN_ORDER: cg_ids.append("quai-network")
+        if "XEC" in COIN_ORDER:  cg_ids.append("ecash")
 
         cg = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ",".join(cg_ids), "vs_currencies": cur},
+            params={"ids": ",".join(cg_ids), "vs_currencies": vs_code},
             timeout=8,
         ).json()
 
-        if "BTC" in COIN_ORDER: out["BTC"]["price"] = pick_first(cg.get("bitcoin", {}), [cur], None)
-        if "BCH" in COIN_ORDER: out["BCH"]["price"] = pick_first(cg.get("bitcoin-cash", {}), [cur], None)
-        if "FB"  in COIN_ORDER: out["FB"]["price"]  = pick_first(cg.get("fractal-bitcoin", {}), [cur], None)
-        if "DGB" in COIN_ORDER: out["DGB"]["price"] = pick_first(cg.get("digibyte", {}), [cur], None)
-        if "CAS" in COIN_ORDER: out["CAS"]["price"] = pick_first(cg.get("cashaa", {}), [cur], None)
-        if "CHTA" in COIN_ORDER: out["CHTA"]["price"] = pick_first(cg.get("cheetahcoin", {}), [cur], None)
-        if "XMR" in COIN_ORDER: out["XMR"]["price"] = pick_first(cg.get("monero", {}), [cur], None)
-        if "QUAI" in COIN_ORDER: out["QUAI"]["price"] = pick_first(cg.get("quai-network", {}), [cur], None)
+        def _p(obj):
+            if not isinstance(obj, dict):
+                return None
+            return pick_first(obj, [vs_code], None)
+
+        if "BTC" in COIN_ORDER:  out["BTC"]["price_gbp"]  = _p(cg.get("bitcoin", {}))
+        if "BCH" in COIN_ORDER:  out["BCH"]["price_gbp"]  = _p(cg.get("bitcoin-cash", {}))
+        if "FB"  in COIN_ORDER:  out["FB"]["price_gbp"]   = _p(cg.get("fractal-bitcoin", {}))
+        if "DGB" in COIN_ORDER:  out["DGB"]["price_gbp"]  = _p(cg.get("digibyte", {}))
+        if "CAS" in COIN_ORDER:  out["CAS"]["price_gbp"]  = _p(cg.get("cashaa", {}))
+        if "XMR" in COIN_ORDER:  out["XMR"]["price_gbp"]  = _p(cg.get("monero", {}))
+        if "QUAI" in COIN_ORDER: out["QUAI"]["price_gbp"] = _p(cg.get("quai-network", {}))
+        if "XEC" in COIN_ORDER:  out["XEC"]["price_gbp"]  = _p(cg.get("ecash", {}))
     except Exception:
         pass
 
@@ -1167,31 +1265,6 @@ def fetch_coin_stats():
         if "DGB" in COIN_ORDER: out["DGB"]["diff"] = pick_first(_wtm_coin_json(113), ["difficulty"], None)
     except Exception:
         pass
-
-    try:
-        if "CAS" in COIN_ORDER:
-            r = requests.get("https://casplorer.com/api/getdifficulty", timeout=8)
-            r.raise_for_status()
-            txt = r.text.strip()
-            out["CAS"]["diff"] = float(txt)
-    except Exception:
-        pass
-
-    try:
-        if "CHTA" in COIN_ORDER:
-            r = requests.get("http://chtaexplorer.mooo.com:3002/api/getdifficulty", timeout=8)
-            r.raise_for_status()
-            txt = r.text.strip()
-            out["CHTA"]["diff"] = float(txt)
-    except Exception:
-        pass
-
-    try:
-        if "XMR" in COIN_ORDER:
-            out["XMR"]["diff"] = pick_first(_wtm_coin_json(101), ["difficulty"], None)
-    except Exception:
-        pass
-
     try:
         if "QUAI" in COIN_ORDER:
             qd = fetch_quai_sha256_difficulty()
@@ -1199,9 +1272,22 @@ def fetch_coin_stats():
                 out["QUAI"]["diff"] = qd
     except Exception:
         pass
+    try:
+        if "XEC" in COIN_ORDER: out["XEC"]["diff"] = pick_first(_wtm_coin_json(370), ["difficulty"], None)
+    except Exception:
+        pass
+
+    # CAS difficulty endpoint varies by explorer; if it fails, we just show "-" safely.
+    try:
+        if "CAS" in COIN_ORDER:
+            r = requests.get("https://casplorer.com/api/getdifficulty", timeout=8)
+            r.raise_for_status()
+            txt = (r.text or "").strip()
+            out["CAS"]["diff"] = float(txt)
+    except Exception:
+        pass
 
     return out
-
 
 def coin_loop():
     global coin_state, coin_last_ok_unix, coin_last_err
@@ -1227,7 +1313,7 @@ def coin_loop():
             last_logo_refresh = now_unix
 
         try:
-            cs = fetch_coin_stats()
+            cs = fetch_coin_stats_gbp()
             with _coin_lock:
                 coin_state = cs
                 coin_last_ok_unix = int(time.time())
@@ -1256,7 +1342,6 @@ def _bool_flag(val):
     if s in ("0", "false", "no", "off"):
         return False
     return False
-
 
 def _parse_stratum_host_port(url, port_hint):
     host = None
@@ -1288,12 +1373,41 @@ def _parse_stratum_host_port(url, port_hint):
 
     return host, port
 
+def _apply_custom_mining_rules(host: str, port_num: int):
+    """
+    Returns (label, symbol) if a CUSTOM_MINING_RULE matches, else (None, None).
+    Hard-to-break: ignores invalid entries safely.
+    """
+    if not host:
+        return None, None
+    h = str(host).lower()
+
+    rules = CUSTOM_MINING_RULES if isinstance(CUSTOM_MINING_RULES, list) else []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        hc = r.get("host_contains")
+        coin = r.get("coin")
+        p = r.get("port", None)
+        if not hc or not coin:
+            continue
+        try:
+            if str(hc).lower() not in h:
+                continue
+            if p is not None:
+                try:
+                    p_int = int(p)
+                except Exception:
+                    continue
+                if port_num is None or int(port_num) != p_int:
+                    continue
+            return str(coin).upper(), str(coin).upper()
+        except Exception:
+            continue
+
+    return None, None
 
 def derive_mining_info(miner):
-    """
-    Generic mining display based on stratum host:port and/or worker name.
-    No pool- or coin-specific assumptions.
-    """
     model = miner.get("model")
     url = miner.get("stratum_url")
     port = miner.get("stratum_port")
@@ -1304,8 +1418,13 @@ def derive_mining_info(miner):
     fb_url = miner.get("fallback_stratum_url")
     fb_port = miner.get("fallback_stratum_port")
 
-    # Many firmwares use a fallback pool; keep behaviour but generic
-    if _bool_flag(using_fallback) or _bool_flag(is_using_fallback_stratum):
+    if model == "Nerd" and _bool_flag(using_fallback):
+        if fb_url:
+            url = fb_url
+        if fb_port:
+            port = fb_port
+
+    if model == "Gamma" and _bool_flag(is_using_fallback_stratum):
         if fb_url:
             url = fb_url
         if fb_port:
@@ -1313,22 +1432,54 @@ def derive_mining_info(miner):
 
     host, port_num = _parse_stratum_host_port(url, port)
 
-    label_parts = []
-    if host:
-        label_parts.append(host)
-    if port_num:
-        label_parts.append(str(port_num))
-    label = ":".join(label_parts) if label_parts else None
+    # ✅ 1) User custom rules (highest priority)
+    custom_label, custom_symbol = _apply_custom_mining_rules(host, port_num)
+    if custom_label:
+        return f"Mining {custom_label}", custom_symbol
 
-    text = None
-    if label:
-        text = f"Pool: {label}"
-    elif user:
-        text = f"Worker: {user}"
-    else:
-        text = None
+    # ✅ 2) Known auto-detection rules (best-effort)
+    mining_label = None
+    mining_symbol = None
 
-    mining_symbol = None  # public version is coin-agnostic
+    h = (host or "").lower()
+
+    if h.endswith("lucky-pool.co.uk") or h.endswith("iha.sh"):
+        # best-effort ports
+        if port_num == 1111:
+            mining_label = "CAS"; mining_symbol = "CAS"
+        elif port_num == 7702:
+            mining_label = "CHTA"; mining_symbol = "CHTA"
+
+    elif "quai-sha256.kryptex.network" in h:
+        mining_label = "QUAI"; mining_symbol = "QUAI"
+    elif "xec.kryptex.network" in h:
+        mining_label = "XEC"; mining_symbol = "XEC"
+    elif "dgb.kryptex.network" in h:
+        mining_label = "DGB"; mining_symbol = "DGB"
+
+    # Mining-Dutch style: infer from worker name prefix if present
+    elif "sha256.mining-dutch.nl" in h or "americas.mining-dutch.nl" in h:
+        if user:
+            su = str(user).strip()
+            worker_part = su.split(".", 1)[1].strip() if "." in su else su
+            if worker_part:
+                coin_prefix = worker_part.split("-", 1)[0].strip()
+                base = coin_prefix or worker_part
+                up = base.upper()
+                if up.startswith("BCH"):
+                    mining_label = "BCH"; mining_symbol = "BCH"
+                elif up.startswith("FB"):
+                    mining_label = "FB"; mining_symbol = "FB"
+                elif up.startswith("DGB"):
+                    mining_label = "DGB"; mining_symbol = "DGB"
+                elif up.startswith("QUAI"):
+                    mining_label = "QUAI"; mining_symbol = "QUAI"
+                elif up.startswith("XEC"):
+                    mining_label = "XEC"; mining_symbol = "XEC"
+                else:
+                    mining_label = base
+
+    text = f"Mining {mining_label}" if mining_label else None
     return text, mining_symbol
 
 
@@ -1340,6 +1491,20 @@ def derive_mining_info(miner):
 def health():
     return jsonify({"ok": True})
 
+@app.post("/ack_notification")
+def ack_notification():
+    try:
+        js = request.get_json(silent=True) or {}
+    except Exception:
+        js = {}
+    ids = []
+    if isinstance(js, dict):
+        if "id" in js and js.get("id") is not None:
+            ids = [js.get("id")]
+        elif "ids" in js and isinstance(js.get("ids"), list):
+            ids = js.get("ids")
+    changed = ack_notification_ids(ids)
+    return jsonify({"ok": True, "acked": changed})
 
 @app.get("/data")
 def data():
@@ -1347,14 +1512,12 @@ def data():
         coins_out = {}
         for sym in COIN_ORDER:
             c = coin_state.get(sym, {})
-            price_raw = c.get("price")
-            diff_raw = c.get("diff")
+            price_raw = c.get("price_gbp")
             coins_out[sym] = {
-                # keep names for frontend compatibility; values are generic fiat
                 "price_gbp": fmt_fiat(price_raw) if price_raw is not None else "-",
-                "diff": fmt_diff_si(diff_raw) if diff_raw is not None else "-",
+                "diff": fmt_diff_si(c.get("diff")) if c.get("diff") is not None else "-",
                 "price_gbp_raw": price_raw,
-                "diff_raw": diff_raw,
+                "diff_raw": c.get("diff"),
             }
         coin_ok_unix = coin_last_ok_unix
         coin_err = coin_last_err
@@ -1388,6 +1551,15 @@ def data():
     else:
         maint_days_left = None
 
+    with _notif_lock:
+        pending_notifs = [
+            {"id": n.get("id"), "type": n.get("type"), "ts_unix": int(n.get("ts_unix", 0)),
+             "payload": n.get("payload") if isinstance(n.get("payload"), dict) else {}}
+            for n in notifications
+            if not n.get("acked", False)
+        ]
+        pending_notifs.sort(key=lambda x: int(x.get("ts_unix", 0)))
+
     out = {
         "miners": [],
         "refresh_seconds": REFRESH_SECONDS,
@@ -1409,6 +1581,7 @@ def data():
         "miner_page_seconds": MINER_PAGE_SECONDS,
         "miners_per_page": MINERS_PER_PAGE,
         "maintenance_days_left": maint_days_left,
+        "notifications": pending_notifs,
     }
 
     for _, m in miners_state.items():
@@ -1430,10 +1603,7 @@ def data():
         except Exception:
             rej_pct_val = None
 
-        if rej_pct_val is not None:
-            rej_pct_str = f"{rej_pct_val:.2f}%"
-        else:
-            rej_pct_str = "-"
+        rej_pct_str = f"{rej_pct_val:.2f}%" if rej_pct_val is not None else "-"
 
         ths_val = None
         try:
@@ -1472,51 +1642,42 @@ def data():
         except Exception:
             eff_jth = None
 
-        if power_w is not None:
-            power_display = f"{int(round(power_w))} W"
-        else:
-            power_display = "-"
-
-        if eff_jth is not None:
-            eff_display = f"{eff_jth:.1f} J/Th"
-        else:
-            eff_display = "-"
+        power_display = f"{int(round(power_w))} W" if power_w is not None else "-"
+        eff_display = f"{eff_jth:.1f} J/Th" if eff_jth is not None else "-"
 
         mining_text, mining_symbol = derive_mining_info(m)
 
-        out["miners"].append(
-            {
-                "name": m["name"],
-                "ip": m["ip"],
-                "model": m.get("model"),
-                "online": m["online"],
-                "uptime_seconds": m.get("uptime_seconds"),
-                "hashrate": fmt_hashrate_ths(m.get("hashrate_ths")) if m.get("hashrate_ths") is not None else "-",
-                "hashrate_ths_raw": m.get("hashrate_ths"),
-                "temp": fmt_temp_pair(m.get("asic_temp"), m.get("vr_temp")),
-                "asic_temp_raw": m.get("asic_temp"),
-                "vr_temp_raw": m.get("vr_temp"),
-                "fan_speed": m.get("fan_speed"),
-                "shares_accepted": fmt_int_short(m.get("shares_accepted")) if m.get("shares_accepted") is not None else "-",
-                "shares_accepted_raw": m.get("shares_accepted"),
-                "shares_rejected": fmt_int_short(m.get("shares_rejected")) if m.get("shares_rejected") is not None else "0",
-                "shares_rejected_raw": m.get("shares_rejected"),
-                "shares_rejected_pct": rej_pct_str,
-                "shares_rejected_pct_raw": rej_pct_val,
-                "session_best": fmt_diff_si_adaptive(weekly_raw) if weekly_raw is not None else "-",
-                "session_best_raw": weekly_raw,
-                "best_overall": fmt_diff_si_adaptive(m.get("best_overall")) if m.get("best_overall") is not None else "-",
-                "best_overall_raw": bo_raw_num,
-                "blocks": int(m.get("blocks", 0)),
-                "last_seen_unix": m.get("last_seen_unix"),
-                "power_watts": power_w,
-                "power_display": power_display,
-                "efficiency_jth": eff_jth,
-                "efficiency_display": eff_display,
-                "mining_display": mining_text,
-                "mining_symbol": mining_symbol,
-            }
-        )
+        out["miners"].append({
+            "name": m["name"],
+            "ip": m["ip"],
+            "model": m.get("model"),
+            "online": m["online"],
+            "uptime_seconds": m.get("uptime_seconds"),
+            "hashrate": fmt_hashrate_ths(m.get("hashrate_ths")) if m.get("hashrate_ths") is not None else "-",
+            "hashrate_ths_raw": m.get("hashrate_ths"),
+            "temp": fmt_temp_pair(m.get("asic_temp"), m.get("vr_temp")),
+            "asic_temp_raw": m.get("asic_temp"),
+            "vr_temp_raw": m.get("vr_temp"),
+            "fan_speed": m.get("fan_speed"),
+            "shares_accepted": fmt_int_short(m.get("shares_accepted")) if m.get("shares_accepted") is not None else "-",
+            "shares_accepted_raw": m.get("shares_accepted"),
+            "shares_rejected": fmt_int_short(m.get("shares_rejected")) if m.get("shares_rejected") is not None else "0",
+            "shares_rejected_raw": m.get("shares_rejected"),
+            "shares_rejected_pct": rej_pct_str,
+            "shares_rejected_pct_raw": rej_pct_val,
+            "session_best": fmt_diff_si_adaptive(weekly_raw) if weekly_raw is not None else "-",
+            "session_best_raw": weekly_raw,
+            "best_overall": fmt_diff_si_adaptive(m.get("best_overall")) if m.get("best_overall") is not None else "-",
+            "best_overall_raw": bo_raw_num,
+            "blocks": int(m.get("blocks", 0)),
+            "last_seen_unix": m.get("last_seen_unix"),
+            "power_watts": power_w,
+            "power_display": power_display,
+            "efficiency_jth": eff_jth,
+            "efficiency_display": eff_display,
+            "mining_display": mining_text,
+            "mining_symbol": mining_symbol,
+        })
 
     return jsonify(out)
 
@@ -1593,10 +1754,7 @@ html, body {
   margin-top: 3px;
 }
 
-/* date/time next to LIVE normal white */
-#liveTime {
-  color: var(--text);
-}
+#liveTime { color: var(--text); }
 
 .dot {
   width: 7px;
@@ -1652,10 +1810,7 @@ html, body {
   margin-left: 6px;
 }
 
-.tickerWeekly {
-  margin-left: 70px;
-  margin-right: 70px;
-}
+.tickerWeekly { margin-left: 70px; margin-right: 70px; }
 
 .coinLogo {
   width: 16px;
@@ -1668,15 +1823,7 @@ html, body {
   flex: 0 0 auto;
 }
 
-.ind {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  font-weight: 1000;
-  font-size: 12px;
-  line-height: 1;
-}
+.ind { display: inline-flex; align-items: center; justify-content: center; width: 14px; font-weight: 1000; font-size: 12px; line-height: 1; }
 .indUp { color: var(--green); }
 .indDown { color: var(--red); }
 .indFlat { color: rgba(255,255,255,0.85); }
@@ -1712,65 +1859,21 @@ html, body {
   text-overflow: ellipsis;
 }
 
-.minerLine {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 5px;
-  min-width: 0;
-  width: 100%;
-}
+.minerLine { display: flex; align-items: center; gap: 8px; margin-top: 5px; min-width: 0; width: 100%; }
 
-.rankIcon {
-  font-size: 16px;
-  filter: drop-shadow(0 0 5px rgba(255,216,74,0.25));
-  width: 1.4em;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+.rankIcon { font-size: 16px; filter: drop-shadow(0 0 5px rgba(255,216,74,0.25)); width: 1.4em; display: flex; align-items: center; justify-content: center; }
 
-.minerName {
-  font-size: 19px;
-  font-weight: 900;
-  line-height: 1.05;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
+.minerName { font-size: 19px; font-weight: 900; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-.motwName {
-  color: var(--gold);
-  animation: goldGlow 1.35s ease-in-out infinite;
-  text-shadow: 0 0 10px rgba(255,207,51,0.25);
-}
+.motwName { color: var(--gold); animation: goldGlow 1.35s ease-in-out infinite; text-shadow: 0 0 10px rgba(255,207,51,0.25); }
 
-.blocks {
-  margin-left: 6px;
-  font-size: 13px;
-  font-weight: 900;
-  color: rgba(255,255,255,0.72);
-  flex: 0 0 auto;
-}
+.blocks { margin-left: 6px; font-size: 13px; font-weight: 900; color: rgba(255,255,255,0.72); flex: 0 0 auto; }
 .blocksLeader { color: var(--gold); }
 
-.sub {
-  margin-top: 3px;
-  font-size: 12px;
-  color: rgba(255,255,255,0.70);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-}
+.sub { margin-top: 3px; font-size: 12px; color: rgba(255,255,255,0.70); display: flex; align-items: center; gap: 8px; width: 100%; }
 
-.miningWrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
+.miningWrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.miningWrap .coinLogo { width: 14px; height: 14px; }
 
 .statusDot { width: 8px; height: 8px; border-radius: 999px; }
 .online { background: rgba(39,245,167,1); box-shadow: 0 0 8px rgba(39,245,167,0.45); }
@@ -1778,48 +1881,21 @@ html, body {
 .staleYellow { background: rgba(255,216,74,1); box-shadow: 0 0 8px rgba(255,216,74,0.35); }
 .staleRed { background: rgba(255,59,59,1); box-shadow: 0 0 8px rgba(255,59,59,0.35); }
 
-.valueBig {
-  font-size: 19px;
-  font-weight: 900;
-  margin-top: 6px;
-  line-height: 1.05;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: rgba(255,255,255,0.92);
-  width: 100%;
-}
+.valueBig { font-size: 19px; font-weight: 900; margin-top: 6px; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255,255,255,0.92); width: 100%; }
 
 .green { color: var(--green); }
 .orange { color: var(--orange); }
 .red { color: var(--red); }
 
 @keyframes goldGlow {
-  0% {
-    text-shadow: 0 0 6px rgba(255,207,51,0.25),
-                 0 0 14px rgba(255,207,51,0.12);
-    filter: brightness(1.00);
-  }
-  50% {
-    text-shadow: 0 0 10px rgba(255,207,51,0.55),
-                 0 0 22px rgba(255,207,51,0.28);
-    filter: brightness(1.10);
-  }
-  100% {
-    text-shadow: 0 0 6px rgba(255,207,51,0.25),
-                 0 0 14px rgba(255,207,51,0.12);
-    filter: brightness(1.00);
-  }
+  0% { text-shadow: 0 0 6px rgba(255,207,51,0.25), 0 0 14px rgba(255,207,51,0.12); filter: brightness(1.00); }
+  50% { text-shadow: 0 0 10px rgba(255,207,51,0.55), 0 0 22px rgba(255,207,51,0.28); filter: brightness(1.10); }
+  100% { text-shadow: 0 0 6px rgba(255,207,51,0.25), 0 0 14px rgba(255,207,51,0.12); filter: brightness(1.00); }
 }
 
-.bestTop {
-  color: var(--gold);
-  animation: goldGlow 1.35s ease-in-out infinite;
-  text-shadow: 0 0 10px rgba(255,207,51,0.25);
-}
+.bestTop { color: var(--gold); animation: goldGlow 1.35s ease-in-out infinite; text-shadow: 0 0 10px rgba(255,207,51,0.25); }
 
 .titleStats { color: var(--yellow); }
-
 .slash { color: rgba(255,255,255,0.92) !important; display: inline-block; padding: 0 2px; }
 
 .blockPopup {
@@ -1840,7 +1916,7 @@ html, body {
   background: radial-gradient(circle at top, #222a4a, #050814);
   border-radius: 22px;
   padding: 22px 18px 18px;
-  max-width: 380px;
+  max-width: 420px;
   width: 100%;
   text-align: center;
   box-shadow: 0 18px 40px rgba(0,0,0,0.65);
@@ -1855,15 +1931,7 @@ html, body {
 .slideRow { animation: swapSlide 0.6s ease-out; }
 @keyframes swapSlide { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
 
-.footerLine {
-  margin-top: 6px;
-  font-size: 12px;
-  color: rgba(255,255,255,0.55);
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  user-select: none;
-}
+.footerLine { margin-top: 6px; font-size: 12px; color: rgba(255,255,255,0.55); display: flex; justify-content: space-between; gap: 10px; user-select: none; }
 
 @media (max-width: 520px) {
   .title { font-size: 22px; }
@@ -1882,7 +1950,7 @@ html, body {
   <div class="top">
     <div>
       <div class="title">Mining <span class="titleStats">Stats</span> Dashboard</div>
-      <div class="updated" id="updated">Dash Updated: - • Coins Updated: - • Time Since Last Block: -</div>
+      <div class="updated" id="updated">Dash Updated: - • Coins Updated: - • Last Block: -</div>
     </div>
     <div class="live"><span class="dot"></span> LIVE <span id="liveTime">--</span></div>
   </div>
@@ -1903,6 +1971,7 @@ const TEMP_ORANGE_AT = __TEMP_ORANGE_AT__;
 const TEMP_RED_AT = __TEMP_RED_AT__;
 const STALE_YELLOW_SECONDS = __STALE_YELLOW__;
 const STALE_RED_SECONDS = __STALE_RED__;
+const TEMP_UNIT = "__TEMP_UNIT__";
 
 const COIN_ORDER = __COIN_ORDER__;
 const MINER_PAGE_SECONDS = __MINER_PAGE_SECONDS__;
@@ -1919,10 +1988,6 @@ for (const s of COIN_ORDER) prevCoins[s] = { price: null, diff: null };
 
 const FALLBACK_LOGO = __FALLBACK_LOGO__;
 
-const prevBlocks = {};
-
-let BEST_WEEK_NAME = null;
-let BEST_WEEK_STR = null;
 let MOTW_NAME = null;
 let MOTW_STR = null;
 let TICKER_STATS = null;
@@ -1932,8 +1997,11 @@ let globalSorted = [];
 let rotateOffset = 0;
 let lastSortedFingerprint = null;
 
-// Track when dash data last arrived
 let DASH_LAST_OK_UNIX = null;
+
+let NOTIF_QUEUE = [];
+let NOTIF_IDS = new Set();
+let ACTIVE_NOTIF = null;
 
 function showBlockPopup(minerName) {
   const el = document.getElementById('blockPopup');
@@ -1956,11 +2024,51 @@ function hideBlockPopup() {
   el.innerHTML = '';
 }
 
+async function ackNotification(id) {
+  try {
+    await fetch('/ack_notification', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({id: id})
+    });
+  } catch (e) {}
+}
+
+function showNextNotificationIfIdle() {
+  const bp = document.getElementById('blockPopup');
+  const blockVisible = bp && bp.style.display === 'flex';
+  if (blockVisible) return;
+  if (ACTIVE_NOTIF) return;
+  if (!NOTIF_QUEUE.length) return;
+
+  const n = NOTIF_QUEUE.shift();
+  ACTIVE_NOTIF = n;
+
+  if (n.type === 'block') {
+    const miner = (n.payload && n.payload.miner) ? n.payload.miner : 'Unknown miner';
+    showBlockPopup(miner);
+  } else {
+    const id = n.id;
+    ACTIVE_NOTIF = null;
+    if (id) ackNotification(id);
+    showNextNotificationIfIdle();
+  }
+}
+
+function dismissActiveNotification() {
+  if (!ACTIVE_NOTIF) return;
+  const id = ACTIVE_NOTIF.id;
+  hideBlockPopup();
+  ACTIVE_NOTIF = null;
+  if (id) ackNotification(id);
+  showNextNotificationIfIdle();
+}
+
 (function() {
   const el = document.getElementById('blockPopup');
   if (!el) return;
-  el.addEventListener('click', hideBlockPopup, { passive: true });
-  el.addEventListener('touchstart', hideBlockPopup, { passive: true });
+  el.addEventListener('click', dismissActiveNotification, { passive: true });
+  el.addEventListener('touchstart', dismissActiveNotification, { passive: true });
 })();
 
 function indicator(newVal, oldVal) {
@@ -2022,12 +2130,19 @@ function staleStatus(m) {
   return { dotClass: 'online', extraText: null };
 }
 
+function formatTempDisplay(valC) {
+  const v = Number(valC);
+  if (!Number.isFinite(v)) return null;
+  if (TEMP_UNIT === "F") return Math.round(v * 9 / 5 + 32);
+  return Math.round(v);
+}
+
 function tempHTML(m) {
   const tempClass = pickTempClass(m);
-  const aNum = Number(m.asic_temp_raw);
-  const vNum = Number(m.vr_temp_raw);
-  const left  = Number.isFinite(aNum) ? Math.round(aNum) + '°' : '-';
-  const right = Number.isFinite(vNum) ? Math.round(vNum) + '°' : '-';
+  const aVal = formatTempDisplay(m.asic_temp_raw);
+  const vVal = formatTempDisplay(m.vr_temp_raw);
+  const left  = (aVal !== null ? aVal + '°' : '-');
+  const right = (vVal !== null ? vVal + '°' : '-');
 
   let base = '<span class="' + tempClass + '">' + left + '</span>' +
              '<span class="slash">/</span>' +
@@ -2065,39 +2180,18 @@ function rankIconForIndex(idx) {
 }
 
 function coinLogoHTML(sym) {
-  const primary = LIVE_LOGOS && LIVE_LOGOS[sym] ? LIVE_LOGOS[sym] : '';
+  const primary = (LIVE_LOGOS && LIVE_LOGOS[sym]) ? LIVE_LOGOS[sym] : '';
   const fallbackList = (FALLBACK_LOGO[sym] || []);
   const urls = [];
   if (primary) urls.push(primary);
-  for (let i = 0; i < fallbackList.length; i++) urls.push(fallbackList[i]);
+  for (let i = 0; i < fallbackList.length; i++) if (fallbackList[i]) urls.push(fallbackList[i]);
   if (!urls.length) return '';
-
-  const encoded = encodeURIComponent(JSON.stringify(urls));
   const first = urls[0];
-
-  return '<img class="coinLogo" src="' + first + '" alt="' + sym + '" loading="lazy"' +
-    ' data-urls="' + encoded + '" data-idx="0"' +
-    ' onerror="' +
-      "try{" +
-        "const urls=JSON.parse(decodeURIComponent(this.dataset.urls||'[]'));" +
-        "let i=parseInt(this.dataset.idx||'0',10);" +
-        "i++;" +
-        "if(i<urls.length){this.dataset.idx=String(i);this.src=urls[i];}" +
-        "else{this.style.display='none';}" +
-      "}catch(e){this.style.display='none';}" +
-    '"' +
-  '>';
+  return '<img class="coinLogo" src="' + first + '" alt="' + sym +
+         '" loading="lazy" onerror="this.style.display=\\'none\\';">';
 }
 
-// Weekly best ticker disabled (MOTW already covers it)
-function weeklyBestTickerHTML() {
-  return null;
-}
-
-function motwTickerHTML() {
-  if (!MOTW_STR) return null;
-  return MOTW_STR;
-}
+function motwTickerHTML() { return MOTW_STR || null; }
 
 function computeTickerStats(miners) {
   if (!miners || !miners.length) { TICKER_STATS = null; return; }
@@ -2109,7 +2203,7 @@ function computeTickerStats(miners) {
   let maxTemp = null;
   let totalBlocks = 0;
   let blocksSeen = false;
-  let powerSum = 0, powerCount = 0;
+  let totalPower = 0, powerCount = 0;
 
   for (const m of miners) {
     if (m.online) activeMiners++;
@@ -2132,16 +2226,16 @@ function computeTickerStats(miners) {
 
     const pw = Number(m.power_watts);
     if (Number.isFinite(pw) && pw > 0) {
-      powerSum += pw;
+      totalPower += pw;
       powerCount++;
     }
   }
 
   const totalHash = hashCount ? hashSum : null;
-  const totalPower = powerCount ? powerSum : null;
+  const totalPowerW = powerCount ? totalPower : null;
   let avgEff = null;
-  if (totalPower != null && totalHash != null && Number.isFinite(totalHash) && totalHash > 0) {
-    avgEff = totalPower / totalHash;
+  if (totalPowerW != null && totalHash != null && Number.isFinite(totalHash) && totalHash > 0) {
+    avgEff = totalPowerW / totalHash;
   }
 
   TICKER_STATS = {
@@ -2151,7 +2245,7 @@ function computeTickerStats(miners) {
     avgTemp: tempCount ? (tempSum / tempCount) : null,
     maxTemp: maxTemp,
     totalBlocks: blocksSeen ? totalBlocks : null,
-    totalPowerW: totalPower,
+    totalPowerW: totalPowerW,
     avgEffJTH: avgEff,
   };
 }
@@ -2188,8 +2282,10 @@ function statsTickerItems() {
     items.push({ html: '📈 Avg Efficiency: ' + val + ' J/Th 📈', cls: ' tickerWeekly' });
   }
   if (s.avgTemp != null && Number.isFinite(Number(s.avgTemp))) {
-    const avg = Math.round(Number(s.avgTemp));
-    const max = (s.maxTemp != null && Number.isFinite(Number(s.maxTemp))) ? Math.round(Number(s.maxTemp)) : avg;
+    const avgC = Number(s.avgTemp);
+    const maxC = (s.maxTemp != null && Number.isFinite(Number(s.maxTemp))) ? Number(s.maxTemp) : avgC;
+    const avg = formatTempDisplay(avgC);
+    const max = formatTempDisplay(maxC);
     items.push({ html: '🌡 Temperatures - Avg ' + avg + ' / Max ' + max + ' 🌡', cls: ' tickerWeekly' });
   }
   if (MAINT_DAYS_LEFT != null && Number.isFinite(Number(MAINT_DAYS_LEFT))) {
@@ -2225,13 +2321,9 @@ function buildTickerHTML(coins) {
   for (const sym of COIN_ORDER) items.push({ html: item(sym), cls: "" });
 
   var motwLine = motwTickerHTML();
-  var bestWeekLine = weeklyBestTickerHTML();
-  var statsItemsArr = statsTickerItems();
-
   if (motwLine) items.push({ html: motwLine, cls: " tickerWeekly" });
-  if (bestWeekLine) items.push({ html: bestWeekLine, cls: " tickerWeekly" });
 
-  items = items.concat(statsItemsArr);
+  items = items.concat(statsTickerItems());
 
   var doubled = items.concat(items);
   return doubled.map(function(obj) {
@@ -2277,6 +2369,10 @@ function minerRowHTML(m, globalIdx, slide, topWeeklyName, topBestName, blockLead
   const motwClass = (MOTW_NAME && m.name === MOTW_NAME) ? ' motwName' : '';
 
   const miningText = m.mining_display || (m.ip || '');
+  let miningLogoHTML = '';
+  if (m.mining_symbol && (LIVE_LOGOS[m.mining_symbol] || (FALLBACK_LOGO[m.mining_symbol] && FALLBACK_LOGO[m.mining_symbol].length))) {
+    miningLogoHTML = coinLogoHTML(m.mining_symbol);
+  }
 
   let html = '';
   html += '<div class="row">';
@@ -2290,7 +2386,7 @@ function minerRowHTML(m, globalIdx, slide, topWeeklyName, topBestName, blockLead
   html += m.name;
   html += '</div></div>';
   html += '<div class="sub">';
-  html += '<span class="miningWrap"><span>' + miningText + '</span></span>';
+  html += '<span class="miningWrap">' + (miningLogoHTML || '') + '<span>' + miningText + '</span></span>';
   html += '<span class="statusDot ' + st.dotClass + '"></span>';
   html += '<span>' + thirdBit + '</span>';
   html += '</div>';
@@ -2307,12 +2403,11 @@ function minerRowHTML(m, globalIdx, slide, topWeeklyName, topBestName, blockLead
   return html;
 }
 
-// Dynamic visible rows based on screen width
 function getVisibleRows() {
   const w = window.innerWidth || document.documentElement.clientWidth || 0;
   if (w >= 1600) return 5;
   if (w >= 1200) return 4;
-  if (w >= 800)  return 3;
+  if (w >= 600)  return 3;
   return 2;
 }
 
@@ -2338,9 +2433,8 @@ function renderAllMiners(slideRotatingRow) {
   } else {
     const fixedCount = Math.max(1, visibleCount - 1);
     const fixedToShow = Math.min(fixedCount, total);
-    for (let i = 0; i < fixedToShow; i++) {
-      display.push(sorted[i]);
-    }
+    for (let i = 0; i < fixedToShow; i++) display.push(sorted[i]);
+
     const rotPool = sorted.slice(fixedToShow);
     const len = rotPool.length;
     if (len === 1) {
@@ -2392,29 +2486,27 @@ function renderAllMiners(slideRotatingRow) {
   container.innerHTML = html;
 
   if (footer) {
-    let txt =
-      'Showing top ' + display.length + ' miners (of ' + total + ')';
-    if (rotatingRowIndex !== null) {
-      txt += ' • row ' + (rotatingRowIndex + 1) + ' rotates every ' + MINER_PAGE_SECONDS + 's';
-    }
+    let txt = 'Showing top ' + display.length + ' miners (of ' + total + ')';
+    if (rotatingRowIndex !== null) txt += ' • row ' + (rotatingRowIndex + 1) + ' rotates every ' + MINER_PAGE_SECONDS + 's';
     footer.textContent = txt;
   }
+}
 
-  for (const m of sorted) {
-    const name = m.name;
-    const currentBlocks = Number(m.blocks || 0);
-    if (Object.prototype.hasOwnProperty.call(prevBlocks, name)) {
-      const prevVal = Number(prevBlocks[name] || 0);
-      if (currentBlocks > prevVal) showBlockPopup(name);
-    }
-    prevBlocks[name] = currentBlocks;
+function mergeNotificationsFromServer(arr) {
+  if (!arr || !arr.length) return;
+  for (const n of arr) {
+    if (!n || !n.id) continue;
+    const id = String(n.id);
+    if (NOTIF_IDS.has(id)) continue;
+    NOTIF_IDS.add(id);
+    NOTIF_QUEUE.push({ id: id, type: n.type, ts_unix: Number(n.ts_unix || 0), payload: n.payload || {} });
   }
+  NOTIF_QUEUE.sort((a,b) => (Number(a.ts_unix||0) - Number(b.ts_unix||0)));
 }
 
 async function tick() {
   try {
     const d = await fetchData();
-
     DASH_LAST_OK_UNIX = Math.floor(Date.now() / 1000);
 
     const sinceTxt = sinceLastBlockText(d.last_any_block_ts);
@@ -2432,11 +2524,15 @@ async function tick() {
       updatedEl.textContent =
         'Dash Updated: ' + dashAge +
         ' • Coins Updated: ' + coinsAge +
-        ' • Time Since Last Block: ' + sinceTxt;
+        ' • Last Block: ' + sinceTxt;
+    }
+
+    if (d.notifications && Array.isArray(d.notifications)) {
+      mergeNotificationsFromServer(d.notifications);
+      showNextNotificationIfIdle();
     }
 
     const miners = (d.miners || []).slice();
-
     const sorted = miners.sort(function(a, b) {
       const ab = Number(a.blocks || 0);
       const bb = Number(b.blocks || 0);
@@ -2448,21 +2544,6 @@ async function tick() {
 
       return (a.name || '').localeCompare(b.name || '');
     });
-
-    BEST_WEEK_NAME = d.prev_week_best_name || null;
-    BEST_WEEK_STR  = d.prev_week_best_str || null;
-
-    if (!BEST_WEEK_NAME || !BEST_WEEK_STR) {
-      let bestWeekName = null, bestWeekStr = null, bestWeekRaw = -Infinity;
-      for (const m of sorted) {
-        const raw = Number(m.session_best_raw);
-        if (Number.isFinite(raw) && raw > bestWeekRaw) {
-          bestWeekRaw = raw; bestWeekName = m.name; bestWeekStr = m.session_best || '-';
-        }
-      }
-      BEST_WEEK_NAME = bestWeekName;
-      BEST_WEEK_STR = bestWeekStr;
-    }
 
     computeTickerStats(sorted);
 
@@ -2496,7 +2577,6 @@ function rotatePage() {
   renderAllMiners(true);
 }
 
-// LIVE clock (date + time)
 function updateLiveClock() {
   const liveEl = document.getElementById('liveTime');
   if (!liveEl) return;
@@ -2511,9 +2591,7 @@ function updateLiveClock() {
   liveEl.textContent = dateStr + ' ' + timeStr;
 }
 
-window.addEventListener('resize', function() {
-  renderAllMiners(false);
-});
+window.addEventListener('resize', function() { renderAllMiners(false); });
 
 tick();
 setInterval(tick, REFRESH_MS);
@@ -2531,12 +2609,11 @@ setInterval(updateLiveClock, 1000);
         "FB":  ["https://assets.coingecko.com/coins/images/37001/large/fractal-bitcoin.png"],
         "DGB": ["https://assets.coingecko.com/coins/images/63/large/digibyte.png"],
         "CAS": ["https://cascoin.net/assets/logo.CIwpWNZk_Z1m8T3m.webp"],
-        "CHTA": [],
-        "XMR": ["https://assets.coingecko.com/coins/images/69/large/monero_logo.png"],
         "QUAI": [
             "https://s2.coinmarketcap.com/static/img/coins/64x64/22354.png",
             "https://assets.coingecko.com/coins/images/27928/standard/QuaiLogoFinal.png?1696526947"
         ],
+        "XEC": ["https://assets.coingecko.com/coins/images/16646/large/Logo_Final-21.png"],
     }
 
     html = (
@@ -2550,6 +2627,7 @@ setInterval(updateLiveClock, 1000);
         .replace("__FALLBACK_LOGO__", json.dumps(fallback_logo))
         .replace("__MINER_PAGE_SECONDS__", str(int(MINER_PAGE_SECONDS)))
         .replace("__MINERS_PER_PAGE__", str(int(MINERS_PER_PAGE)))
+        .replace("__TEMP_UNIT__", TEMP_UNIT.upper())
     )
     return Response(html, mimetype="text/html; charset=utf-8")
 
@@ -2564,6 +2642,7 @@ if __name__ == "__main__":
     _load_motw()
     _load_maintenance()
     _load_weekly_current()
+    _load_notifications()
 
     with _blocks_lock:
         if week_start_unix is None:
